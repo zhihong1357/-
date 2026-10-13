@@ -82,7 +82,7 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 | 3 | **底部长度** | 15 ~ 180 根K线 | 底部起点 = 区间内最高点 |
 | 4 | **收缩次数** | 2 ~ 6 次 | T2、T3、T4… |
 | 5 | **回撤逐次缩小** | 每段 ≤ 上一段（容忍 10%），且末段 < 首段 | 例：30% → 15% → 7% |
-| 6 | **首次回撤** | ≤ 60% | 加密货币波动大，股票原版约 ≤35% |
+| 6 | **首次回撤** | ≤ 35% | Minervini 原版标准 |
 | 7 | **最后一次回撤** | ≤ 15% | 越紧越好 |
 | 8 | **未跌破末段低点** | | 跌破即形态失败 |
 | 9 | **成交量萎缩** | 末段均量 < 首段均量；最近 5 根均量 < 50 均量 | 卖压枯竭 |
@@ -98,7 +98,7 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 
 ### 常用调整
 - 想要更多结果：`max_last_depth: 0.20`、`pivot_proximity_pct: 0.10`、`require_trend_template: false`
-- 想要更严格：`require_higher_lows: true`、`max_first_depth: 0.40`、`min_contractions: 3`
+- 想要更严格：`require_higher_lows: true`、`min_contractions: 3`
 - 想扫 4 小时图：`interval: 4h`，同时把 `year_bars` 改成 `2190`
 - 只扫大币：`min_quote_volume_24h: 100000000`（1 亿 USDT）
 

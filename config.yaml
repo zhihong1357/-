@@ -59,7 +59,7 @@ vcp:
   recovery_ratio: 0.5             # 反弹收回上段跌幅 50% 以上，才算开始新一段收缩
   min_contractions: 2             # 至少 2 次收缩（T2）
   max_contractions: 6
-  max_first_depth: 0.60           # 第一次回撤 ≤ 60%（加密波动大；股票常用 35%）
+  max_first_depth: 0.35           # 第一次回撤 ≤ 35%（Minervini 原版标准）
   max_last_depth: 0.15            # 最后一次回撤 ≤ 15%（越小越紧）
   contraction_tolerance: 0.10     # 允许后一段比前一段大 10% 以内（相对）
   require_higher_lows: false      # true = 要求每段低点逐步抬高（更严格）

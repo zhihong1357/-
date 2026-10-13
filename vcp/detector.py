@@ -80,7 +80,7 @@ DEFAULTS = {
     "recovery_ratio": 0.5,          # 反弹收复上一段回撤的比例 >= 此值才算新一段收缩
     "min_contractions": 2,
     "max_contractions": 6,
-    "max_first_depth": 0.60,        # 第一段回撤不超过 60%（加密波动大，股票通常 35%）
+    "max_first_depth": 0.35,        # 第一段回撤不超过 35%（Minervini 原版）
     "max_last_depth": 0.15,         # 最后一段回撤不超过 15%
     "min_last_depth": 0.0,
     "contraction_tolerance": 0.10,  # 后一段可比前一段大 10%（相对值）的容忍度
