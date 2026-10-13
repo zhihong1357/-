@@ -1,0 +1,78 @@
+# =====================================================================
+#  VCP 扫描器设置（改完保存即可，不需要懂代码）
+#  “#” 后面是说明文字，不会被程序读取
+# =====================================================================
+
+# ---------- 数据来源 ----------
+# auto = 自动按 binance → bybit → okx → gate 顺序找一个能连上的
+# 也可以直接写 binance / bybit / okx / gate
+exchange: auto
+
+# K线周期：1d(日线，Minervini 原版用日线/周线)  4h  1h  1w
+interval: 1d
+
+# 只扫 24 小时成交额大于这个数（USDT）的合约，过滤流动性差的小币
+min_quote_volume_24h: 20000000     # 2000 万 USDT
+
+# 每次最多扫多少个币（按成交额从大到小），0 = 不限
+max_symbols: 0
+
+# 拉多少根K线（日线 400 根 ≈ 1 年多，够算 MA200 和 52 周高低点）
+kline_limit: 400
+
+# 黑名单：不想扫的币
+exclude: [USDCUSDT, BTCDOMUSDT]
+
+# ---------- 持续运行 ----------
+scan_every_minutes: 60            # --loop 模式下每隔多少分钟扫一次
+
+# 同一个币、同一个状态、同一个 pivot 只提醒一次
+alert_on: [BREAKOUT, SETUP]       # BREAKOUT=带量突破  SETUP=形态成立、接近突破点
+
+# 生成图表：all = 每个符合的币都画；none = 不画
+charts: all
+
+# ---------- 提醒（二选一或都填；不填就只在屏幕上显示） ----------
+telegram:
+  bot_token: ""                   # 例： 7123456789:AAH...（见 README 第 3 步）
+  chat_id: ""                     # 例： 123456789
+discord:
+  webhook_url: ""
+
+# ---------- VCP 判定规则（全部客观量化，可按需调整） ----------
+vcp:
+  # 1) 趋势模板（第二阶段上升趋势）
+  require_trend_template: true
+  ma_fast: 50
+  ma_mid: 150
+  ma_slow: 200
+  ma_slow_rising_bars: 20         # MA200 比 20 根K线前高 = 向上
+  min_above_low_pct: 0.30         # 现价 ≥ 52 周低点 × 1.30
+  max_below_high_pct: 0.25        # 现价 ≥ 52 周高点 × 0.75
+  year_bars: 365                  # 日线一年 365 根（4h 周期请改成 2190）
+  min_history_bars: 120           # 上市不足 120 根K线的币不扫
+
+  # 2) 底部 & 收缩
+  base_min_bars: 15               # 底部最短 15 根K线
+  base_max_bars: 180              # 底部最长 180 根K线
+  zigzag_pct: 0.04                # 摆动点识别灵敏度（4%）
+  recovery_ratio: 0.5             # 反弹收回上段跌幅 50% 以上，才算开始新一段收缩
+  min_contractions: 2             # 至少 2 次收缩（T2）
+  max_contractions: 6
+  max_first_depth: 0.60           # 第一次回撤 ≤ 60%（加密波动大；股票常用 35%）
+  max_last_depth: 0.15            # 最后一次回撤 ≤ 15%（越小越紧）
+  contraction_tolerance: 0.10     # 允许后一段比前一段大 10% 以内（相对）
+  require_higher_lows: false      # true = 要求每段低点逐步抬高（更严格）
+  prior_uptrend_pct: 0.30         # 底部之前要有 ≥30% 的上涨
+  prior_uptrend_bars: 120
+
+  # 3) 成交量萎缩
+  require_volume_dryup: true
+  volume_ma: 50
+  dryup_recent_bars: 5            # 最近 5 根平均量 < 50 均量
+  dryup_ratio: 1.0
+
+  # 4) 信号
+  pivot_proximity_pct: 0.06       # 现价在 pivot 下方 6% 内 → SETUP
+  breakout_volume_ratio: 1.5      # 突破K线成交量 ≥ 50 均量 × 1.5 → BREAKOUT
+  breakout_max_extension: 0.05    # 收盘已高出 pivot 5% 以上就不再提醒（防追高）
