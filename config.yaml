@@ -12,7 +12,7 @@ exchange: auto
 interval: 1d
 
 # 只扫 24 小时成交额大于这个数（USDT）的合约，过滤流动性差的小币
-min_quote_volume_24h: 20000000     # 2000 万 USDT
+min_quote_volume_24h: 3000000      # 300 万 USDT（调低=扫更多币，但小币滑点大）
 
 # 每次最多扫多少个币（按成交额从大到小），0 = 不限
 max_symbols: 0

@@ -75,6 +75,11 @@ def fmt_price(p: float) -> str:
     return f"{p:.6g}"
 
 
+def trend_ok(r) -> bool:
+    tt = [v for k, v in r.checks.items() if k.startswith("趋势:")]
+    return bool(tt) and all(tt)
+
+
 def vs_pivot(r) -> float:
     """现价相对 pivot 的百分比：负数=还在 pivot 下方，正数=已突破"""
     return (r.last_close / r.pivot - 1) * 100
@@ -176,7 +181,9 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     if notifier.enabled and cfg.get("send_summary", True):
         watch = ", ".join(r.symbol for r in sorted(forming, key=lambda r: -r.score)[:10])
         lines = [f"📊 VCP 扫描完成 ({ex.name} · {cfg['interval']})",
-                 f"扫描 {len(results)} 个 USDT 永续合约",
+                 f"交易所共 {len(vols)} 个 USDT 永续，成交额达标并扫描 {len(results)} 个",
+                 f"通过趋势模板: {sum(trend_ok(r) for r in results)} 个",
+                 f"VCP 形态完整成立: {sum(r.valid for r in results)} 个",
                  f"突破 BREAKOUT: {sum(r.status == 'BREAKOUT' for r in hits)} 个",
                  f"接近突破 SETUP: {sum(r.status == 'SETUP' for r in hits)} 个"]
         if hits:
