@@ -44,6 +44,8 @@
    ```
 4. 在 Telegram 里找到你刚建的机器人，点 **Start**，随便发一句 `hi`
 5. 双击 **`5_telegram_test.bat`**，屏幕会显示 `chat_id = 123456789`
+   （或者在 Telegram 搜索 **@userinfobot**，点 Start，它回复的 `Id` 就是你的 chat_id。
+   ⚠️ chat_id **不是** token 冒号前面那串数字，那是机器人自己的 ID）
 6. 把这个数字填进 `config.yaml` 的 `chat_id`，保存
 7. 再双击一次 **`5_telegram_test.bat`**，Telegram 收到“提醒测试成功” ✅
 
@@ -60,7 +62,7 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 
 本仓库已包含 `.github/workflows/vcp-scan.yml`，每 4 小时自动扫描一次（UTC 00:10 日线收盘后必跑）。
 1. 仓库页面 → **Settings → Secrets and variables → Actions → New repository secret**
-2. 添加 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 两个 secret（值同第 3 步）。**不要把 token 直接写进仓库里的 `config.yaml`**，别人看到就能用你的机器人
+2. 添加 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 两个 secret（值同第 3 步；chat_id 可用 @userinfobot 查到）。**不要把 token 直接写进仓库里的 `config.yaml`**，别人看到就能用你的机器人
 3. 打开 **Actions** 页面 → 选 **VCP Scan** → **Run workflow** 手动试一次，Telegram 会收到一条「📊 VCP 扫描完成」汇总
 4. **定时自动运行只在默认分支（main）上生效**：代码必须合并到 `main`，GitHub 才会每 4 小时自动跑
 

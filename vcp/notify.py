@@ -32,6 +32,13 @@ class Notifier:
                 r = requests.post(base + "/sendMessage", data={"chat_id": self.tg_chat, "text": text}, timeout=30)
             if not r.ok:
                 print(f"[Telegram 发送失败] {r.status_code} {r.text[:200]}")
+                if "bot can't send messages to the bot" in r.text or self.tg_chat == self.tg_token.split(":")[0]:
+                    print("  → chat_id 填成了机器人自己的 ID（token 冒号前面那串数字）。"
+                          "请在 Telegram 搜索 @userinfobot，点 Start，它回复的 Id 才是你的 chat_id。")
+                elif "chat not found" in r.text or "bot was blocked" in r.text:
+                    print("  → 请先在 Telegram 里打开你的机器人，点 Start（开始），再重新运行。")
+                elif r.status_code == 401:
+                    print("  → bot_token 不正确，请到 @BotFather 重新复制。")
         except Exception as e:
             print(f"[Telegram 发送失败] {e}")
 
