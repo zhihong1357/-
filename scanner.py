@@ -172,6 +172,21 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     print("=" * 70)
     save_state(state)
 
+    # 每轮扫描结束发一条简短汇总，让你知道机器人在正常工作
+    if notifier.enabled and cfg.get("send_summary", True):
+        watch = ", ".join(r.symbol for r in sorted(forming, key=lambda r: -r.score)[:10])
+        lines = [f"📊 VCP 扫描完成 ({ex.name} · {cfg['interval']})",
+                 f"扫描 {len(results)} 个 USDT 永续合约",
+                 f"突破 BREAKOUT: {sum(r.status == 'BREAKOUT' for r in hits)} 个",
+                 f"接近突破 SETUP: {sum(r.status == 'SETUP' for r in hits)} 个"]
+        if hits:
+            lines.append("信号: " + ", ".join(r.symbol for r in hits[:15]))
+        else:
+            lines.append("本轮没有符合 VCP 的合约")
+        if watch:
+            lines.append(f"观察名单(形态成立、离 pivot 还远): {watch}")
+        notifier.send("\n".join(lines))
+
     pd.DataFrame([r.to_row() for r in hits]).to_csv(run_dir / "signals.csv", index=False, encoding="utf-8-sig")
     table.to_csv(OUT / "latest_all_results.csv", index=False, encoding="utf-8-sig")
     print(f"结果已保存到: {run_dir}   用时 {time.time() - t0:.0f} 秒\n")
@@ -256,8 +271,10 @@ def main():
             scan_once(cfg, notifier)
         except ExchangeError as e:
             print(f"连接交易所失败：{e}")
+            notifier.send(f"⚠️ VCP 扫描失败：连接交易所失败\n{str(e)[:500]}")
         except Exception as e:
             print(f"本轮出错：{e}")
+            notifier.send(f"⚠️ VCP 扫描出错：{str(e)[:500]}")
         if not a.loop:
             break
         mins = cfg.get("scan_every_minutes", 60)

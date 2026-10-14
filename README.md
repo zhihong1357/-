@@ -61,7 +61,8 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 本仓库已包含 `.github/workflows/vcp-scan.yml`，每 4 小时自动扫描一次（UTC 00:10 日线收盘后必跑）。
 1. 仓库页面 → **Settings → Secrets and variables → Actions → New repository secret**
 2. 添加 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 两个 secret（值同第 3 步）。**不要把 token 直接写进仓库里的 `config.yaml`**，别人看到就能用你的机器人
-3. 打开 **Actions** 页面 → 选 **VCP Scan** → **Run workflow** 手动试一次
+3. 打开 **Actions** 页面 → 选 **VCP Scan** → **Run workflow** 手动试一次，Telegram 会收到一条「📊 VCP 扫描完成」汇总
+4. **定时自动运行只在默认分支（main）上生效**：代码必须合并到 `main`，GitHub 才会每 4 小时自动跑
 
 注意：GitHub 的服务器在美国，Binance / Bybit 会拒绝美国 IP，程序会自动改用 OKX 或 Gate 的数据。
 同一个币在各交易所的走势几乎一样，形态判断结果基本一致；你仍可在自己常用的交易所下单。
