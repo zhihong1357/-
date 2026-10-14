@@ -1,0 +1,49 @@
+# 免费云端自动扫描：GitHub 每 4 小时运行一次（日线收盘后 00:10 UTC 必跑）
+# 需在仓库 Settings → Secrets and variables → Actions 添加：
+#   TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID
+# 注意：GitHub 服务器在美国，Binance/Bybit 会拒绝访问，程序会自动改用 OKX / Gate（同币种形态几乎一致）
+name: VCP Scan
+
+on:
+  schedule:
+    - cron: "10 0,4,8,12,16,20 * * *"
+  workflow_dispatch: {}      # 也可以在 Actions 页面手动点 Run workflow
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      # 记住已经提醒过的信号，避免重复通知
+      - uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: vcp-state-${{ github.run_id }}
+          restore-keys: vcp-state-
+
+      - name: Scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python scanner.py
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: vcp-state-${{ github.run_id }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vcp-results
+          path: output/
+          retention-days: 7
