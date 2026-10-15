@@ -57,3 +57,30 @@ def test_replay_and_simulate():
     fake.loc[len(fake) - 1, "high"] = s.plan_tp * 1.01
     res = simulate(fake, len(fake) - 1, s.entry, s, DEFAULTS)
     assert res["outcome"] == "计划止盈达成" and abs(res["r"] - 5) < 1e-6
+
+
+def test_stage2_needs_100pct_advance():
+    df, d1 = make_two_base_4h()
+    s = analyze("X", df, d1)
+    assert s.stage["s2"] and s.stage["adv"] >= 1.0
+    s = analyze("X", df, d1, {"min_advance_pct": 2.0})       # 要求涨 200% → 不是 Stage 2
+    assert not s.stage["s2"] and s.status == "NONE"
+
+
+def test_lower_low_merges_into_previous_contraction():
+    from vcp.detector import Contraction
+    from vcp.engine import merge_higher_lows
+    vol = np.ones(50)
+    cons = [Contraction(0, 100, 5, 80, 0.20, 1), Contraction(10, 95, 15, 85, 0.105, 1),
+            Contraction(20, 92, 25, 78, 0.152, 1), Contraction(30, 90, 35, 86, 0.044, 1)]
+    out = merge_higher_lows(cons, vol)
+    # 第 3 段低点 78 < 80 → 前三段合并成 C1：100 → 78；第 4 段低点 86 更高 → C2
+    assert [(c.peak, c.trough) for c in out] == [(100, 78), (90, 86)]
+    assert abs(out[0].depth - 0.22) < 1e-9
+
+
+def test_more_than_max_bases_is_invalid():
+    df, d1 = make_two_base_4h()
+    s = analyze("X", df, d1, {"max_bases": 1})
+    assert s.base.no == 2 and s.base.status == "LATE"
+    assert not s.valid and s.status == "NONE"
