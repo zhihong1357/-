@@ -39,7 +39,7 @@ TRADE_DEFAULTS = {
 
 VALIDATION_DEFAULTS = {
     "enabled": True,
-    "lookback_bars": 120,          # 回看最近 120 根K线（日线≈4个月）
+    "lookback_bars": 250,          # 回看最近 250 根K线（日线≈8个月）
     "show_cases": 3,               # 汇总里展示最近几个成功案例
 }
 
