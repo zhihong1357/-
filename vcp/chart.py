@@ -141,9 +141,10 @@ def plot_signal(df: pd.DataFrame, sig, path: str, tf: str = "4h", title_extra: s
 
     ttl = f"{display_symbol(sig.symbol)}  {tf}  LONG" + (f"   {title_extra}" if title_extra else "")
     ax.set_title(ttl, color=TEXT, fontsize=12, fontweight="bold")
-    leg = ax.legend(loc="lower left", fontsize=8, facecolor=PANEL, edgecolor=GRID)
-    for t in leg.get_texts():
-        t.set_color(TEXT)
+    if ax.get_legend_handles_labels()[0]:
+        leg = ax.legend(loc="lower left", fontsize=8, facecolor=PANEL, edgecolor=GRID)
+        for t in leg.get_texts():
+            t.set_color(TEXT)
     ax.set_xlim(-1, right + 12)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: fp(v)))
 

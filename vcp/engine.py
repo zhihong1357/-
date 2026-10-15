@@ -1,18 +1,16 @@
 """
-多周期 VCP 引擎（日线判断阶段 + 4 小时找收缩和进场），输出格式参照“师父”的信号报告。
+多周期 VCP 引擎：日线判断阶段 + 执行周期（4h / 1h / 30m）找 Base、收缩和进场。
+打分方式从师父的 9 个信号报告反推（见 README「SCV 扣分制」）。
 
 流程：
-  1. Stage（日线）：Minervini 趋势模板 8 条（含 RS 相对强度 ≥ 70）→ Stage 2；
-     上市不足 200 根日线标记为 NEW（用现有均线判断）；前期翻倍（≥100%）作为加分项
-  2. Base（4h）：从那段大涨的起涨低点开始，按“回撤 ≥ base_min_depth 开始一个 Base，收盘创新高结束”
-     切成 B1、B2…；超过 2 个 Base 判定失效（LATE）
-  3. 每个 Base：C1 = 最高点 → 回调最低点；之后每段收缩的低点必须更高（没抬高就并入前一段）；
-     合格（2~6 次收缩、逐次变小、C1 ≤ 35%、末段 ≤ 15%）→ CONFIRMED
-  4. Pivot = 最后一次收缩的高点；Entry = Pivot × (1 + 挂单缓冲)；Stop = 末段低点 × (1 - 缓冲)；
-     入场风险 > 10% 不做（Minervini：单笔止损不超过 10%）
-  4b. 出场方案（exit_profile）：minervini / master / qullamaggie，历史回放会把三种都算一遍做对比
-  5. SCV 打分：S 结构 / C 收缩 / V 成交量，合计 → 评级
-  6. 价格接近 Entry → SETUP；4h 收盘站上 Entry → BREAKOUT
+  1. Stage（日线）：Minervini 趋势模板 → S2；上市不足 200 根日线标记 NEW
+  2. Base（执行周期）：从起涨低点开始，回撤 ≥ base_min_depth 开始一个 Base，收盘创新高结束 → B1、B2、B3；
+     B4 起失效（LATE）
+  3. 每个 Base：C1 = 最高点 → 回调最低点；之后每段收缩低点必须更高（没抬高就并入前一段）；
+     结构合格 = 至少 2 段、逐段变小、C1 ≤ 35%；当前 Base 末段低点守住一段时间并反弹过半 → CONFIRMED，否则 UNCONFIRMED
+  4. Entry = 末段高点 × (1 + 挂单缓冲)；Stop = 末段低点 × (1 - 缓冲)；末段 > 10% 或入场风险 > 10% → 半仓
+  5. SCV：S / C / V 各自加减分，每项正数 +1、0 记 0、负数 -1，合计 = Score（满分 3）
+  6. 接近 Entry → SETUP；收盘站上 Entry → BREAKOUT
 
 全部规则都是可量化的，参数在 config.yaml 的 strategy: 段调整。
 """
@@ -30,17 +28,16 @@ DEFAULTS = {
     # 周期
     "exec_tf": "4h",
     "stage_tf": "1d",
-    "exec_bars": 900,               # 4h 拉 900 根 ≈ 150 天（要覆盖整段大涨才能正确数 Base）
+    "exec_bars": 900,               # 执行周期拉多少根K线（各周期见 TF_DEFAULTS）
     "stage_bars": 400,              # 日线拉 400 根
     # 阶段（日线）：Minervini 趋势模板
     "new_listing_bars": 200,        # 日线不足 200 根 = 新币 NEW（只用算得出来的均线）
     "ma_slow_rising_bars": 20,      # MA200 至少比 1 个月（20 根）前高；Minervini 更偏好 4~5 个月
     "min_above_low_pct": 0.30,      # 现价 ≥ 52 周低点 × 1.30
     "max_below_high_pct": 0.25,     # 现价 ≥ 52 周高点 × 0.75
-    "min_rs": 70,                   # RS 相对强度（在本次扫描的所有币里排名百分位）≥ 70
-    "strong_rs": 85,                # RS ≥ 85 加分
+    "min_rs": 70,                   # RS 相对强度（在本次扫描的所有币里排名百分位）< 70 → S 扣 1 分
     "advance_lookback": 365,        # 在最近 365 根日线里找起涨低点（也是数 Base 的起点）
-    "advance_bonus_pct": 1.00,      # 前期涨幅 ≥ 100%（翻倍）→ S 加分
+    "advance_bonus_pct": 1.00,      # 前期涨幅门槛（报告里显示是否翻倍；require_advance 时变成硬性条件）
     "require_advance": False,       # true = 把“前期翻倍”变成硬性条件
     # Base / 收缩（4h）
     "base_min_depth": 0.08,         # 从高点回撤 ≥ 8% 才算开始一个 Base
@@ -49,25 +46,25 @@ DEFAULTS = {
     "recovery_ratio": 0.35,         # 反弹收回上段跌幅 ≥ 35% 才算新的一段收缩
     "min_contractions": 2,
     "max_contractions": 6,
-    "max_bases": 2,                 # 超过 2 个 Base 判定失效（后期形态）
+    "max_bases": 3,                 # B4 起判定失效（师父：B3 还能做，只是得分低）
     "max_first_depth": 0.35,        # C1 ≤ 35%（Minervini 原版）
-    "max_last_depth": 0.10,         # 最后一段 ≤ 10%（Minervini：末段通常是个位数的紧密收缩）
+    "half_size_last_c": 0.10,       # 最后一段 > 10% → 风险大，仓位减半（师父）
+    "confirm_bars": 5,              # 末段低点之后至少守住 5 根K线、且反弹过末段一半 → Base CONFIRMED
     "contraction_tolerance": 0.10,
-    "small_c1_pct": 0.20,           # C1 ≤ 20% 视为“C1偏小”（加分）
+    "small_c1_pct": 0.20,           # C1 < 20% 视为“C1偏小”（洗盘不够深，-0.5）
     # 进场 / 计划
     "entry_buffer": 0.005,          # 挂单缓冲 0.5%
     "stop_buffer": 0.005,
     "exit_profile": "minervini",    # 出场方案：minervini / master / qullamaggie（见 PROFILES）
-    "chart_tp_lookback": 180,       # 结构止盈：最近 180 根 4h 内的最高点
+    "chart_tp_lookback": 180,       # 结构止盈：最近 N 根K线内的最高点（各周期见 TF_DEFAULTS）
     "near_entry_pct": 0.03,         # 现价在 Entry 下方 3% 内 = 接近入场
     "max_extension_pct": 0.03,      # 已高出 Entry 3% 以上不再提示（防追高）
     "breakout_lag_bars": 3,         # 最近 3 根 4h 内的突破都算
     # 成交量
     "volume_ma": 50,
-    "vol_expansion": 1.2,
-    "vol_quiet": 0.8,
-    "vol_high": 1.5,
-    "vol_low": 0.7,
+    "vol_spike": 1.3,               # 成交额 ≥ MA50 × 1.3 = 放量K线
+    "recent_vol_bars": 10,          # “近期”= 最近 10 根K线
+    "vol_strong": 2.0,              # 最新成交额 ≥ 2 倍均线 = STRONG；< 1 倍 = WEAK
     "liquidity_cap_pct": 0.10,      # 单笔上限 = 最新 4h 成交额的 10%
     # 扣分项（师父的做法：走满分，慢慢扣分）
     "min_daily_volume": 1_000_000,  # 最近 24h 成交额 < 100 万 USDT → 流动性差，扣分
@@ -76,34 +73,51 @@ DEFAULTS = {
     "wick_min_range": 0.5,          # K线长度至少是近 20 根平均长度的 0.5 倍才算（忽略很小的K线）
     # 评级（Score = S、C、V 三项各 +1/-1 的合计，满分 3）
     "min_rating": "GOOD",           # 低于这个评级不提醒：WEAK < FAIR < GOOD < STRONG < EXCELLENT
+    "min_score": 1,                 # Score 低于这个分数不提醒
     # 仓位
     "account_usdt": 1000,
     "risk_per_trade_pct": 0.01,
     "max_leverage": 5,
-    "max_risk_pct": 0.10,           # 入场风险 > 10% → 不做（Minervini：单笔止损不超过 10%）
+    "max_risk_pct": 0.10,           # 入场风险 > 10% → 半仓（HALF_SIZE）
     # 历史回放
-    "max_hold_bars": 180,           # 最多持有 180 根 4h（30 天）
+    "max_hold_bars": 180,           # 回放最多持有 N 根K线（各周期见 TF_DEFAULTS）
 }
 
 RATINGS = ["WEAK", "FAIR", "GOOD", "STRONG", "EXCELLENT"]
-SCORE_RATING = {3: "EXCELLENT", 2: "STRONG", 1: "GOOD", 0: "FAIR"}
+SCORE_RATING = {3: "STRONG", 2: "GOOD", 1: "GOOD", 0: "FAIR"}   # 师父：3 分 STRONG，1~2 分 GOOD
+
+BARS_PER_DAY = {"15m": 96, "30m": 48, "1h": 24, "4h": 6, "1d": 1}
+# 各执行周期的默认参数（师父：15m/30m 挂单缓冲 0.25%，1h/4h 0.5%）
+TF_DEFAULTS = {
+    "4h": {"exec_bars": 900, "entry_buffer": 0.005, "chart_tp_lookback": 180, "max_hold_bars": 180},
+    "1h": {"exec_bars": 600, "entry_buffer": 0.005, "chart_tp_lookback": 240, "max_hold_bars": 240},
+    "30m": {"exec_bars": 600, "entry_buffer": 0.0025, "chart_tp_lookback": 240, "max_hold_bars": 240},
+    "15m": {"exec_bars": 600, "entry_buffer": 0.0025, "chart_tp_lookback": 240, "max_hold_bars": 240},
+}
+
+
+def tf_config(cfg: dict, tf: str) -> dict:
+    """某个执行周期的完整参数：通用参数 + 周期默认值 + config.yaml 里 tf_overrides 的覆盖。"""
+    out = {**cfg, **TF_DEFAULTS.get(tf, {}), **((cfg.get("tf_overrides") or {}).get(tf) or {})}
+    out["exec_tf"] = tf
+    return out
 
 # 出场方案（R = 入场价 - 止损价）。历史回放对同一批入场三种都算，方便比较哪种在加密货币上更好。
 PROFILES = {
-    # Minervini：涨到 2R 把止损移到保本；3R 卖一半（逢强卖出）；剩下的收盘跌破 MA120(4h ≈ 日线 20MA) 离场
+    # Minervini：涨到 2R 把止损移到保本；3R 卖一半（逢强卖出）；剩下的收盘跌破“20 日均线”离场
     "minervini": {"name": "Minervini", "be_r": 2.0, "partial_r": 3.0, "partial_pct": 0.5,
-                  "partial_after_bars": None, "tp_r": None, "trail_ma": 120},
+                  "partial_after_days": None, "tp_r": None, "trail_days": 20},
     # 师父报告里的参数：0.8R 保本，5R 全部止盈
     "master": {"name": "师父(0.8R保本/5R止盈)", "be_r": 0.8, "partial_r": None, "partial_pct": 0,
-               "partial_after_bars": None, "tp_r": 5.0, "trail_ma": None},
-    # Qullamaggie 风格（公开资料整理，非官方）：3 天后若盈利先卖一半并保本，剩下跌破 MA60(4h ≈ 日线 10MA) 离场
+               "partial_after_days": None, "tp_r": 5.0, "trail_days": None},
+    # Qullamaggie 风格（公开资料整理，非官方）：3 天后若盈利先卖一半并保本，剩下跌破“10 日均线”离场
     "qullamaggie": {"name": "Qullamaggie风格", "be_r": None, "partial_r": None, "partial_pct": 0.5,
-                    "partial_after_bars": 18, "tp_r": None, "trail_ma": 60},
+                    "partial_after_days": 3, "tp_r": None, "trail_days": 10},
 }
 
 
 def rating_of(score: int) -> str:
-    """Score = S/C/V 三项的正负号合计：三项全过 3 分 EXCELLENT，扣到 1 分 GOOD（师父例子），负分 WEAK。"""
+    """Score = S/C/V 三项的正负号合计（满分 3）：3 STRONG，1~2 GOOD，0 FAIR，负分 WEAK。"""
     return SCORE_RATING.get(score, "WEAK" if score < 0 else "EXCELLENT")
 
 
@@ -120,12 +134,14 @@ class Base:
     high: float
     low: float
     cons: list
-    ok: bool
-    status: str              # OK / FAIL / WIDE / CONFIRMED / FORMING
+    ok: bool                 # 结构合格（≥2 段、逐段变小、C1 ≤ 35%、没超过最多 Base 数）
+    status: str              # 已结束：OK / FAIL / WIDE / FORMING / LATE；当前：CONFIRMED / UNCONFIRMED / ...
     current: bool
+    confirmed: bool = False
 
     def label(self) -> str:
-        return f"B{self.no} {self.status if self.status != 'CONFIRMED' else 'OK'}({len(self.cons)}C)"
+        st = {"CONFIRMED": "OK", "UNCONFIRMED": "WAIT"}.get(self.status, self.status)
+        return f"B{self.no} {st}({len(self.cons)}C)"
 
 
 @dataclass
@@ -158,11 +174,12 @@ class Signal:
     valid: bool = False
     rs: Optional[int] = None                 # 相对强度百分位（扫描完所有币后才算得出）
     rs_raw: float = 0.0
+    tf: str = "4h"
 
     def to_row(self) -> dict:
         b = self.base
         return {
-            "symbol": self.symbol, "status": self.status, "valid": self.valid, "rating": self.rating,
+            "symbol": self.symbol, "tf": self.tf, "status": self.status, "valid": self.valid, "rating": self.rating,
             "score": self.score, "detail_total": self.total, "rs": self.rs, "stage": self.stage.get("label"), "base": f"B{b.no}" if b else "",
             "pattern": pattern_text(b), "entry": self.entry, "stop": self.stop, "plan_tp": self.plan_tp,
             "chart_tp": self.chart_tp, "risk_pct": self.risk_pct, "last_close": self.last_close,
@@ -271,9 +288,20 @@ def _eval_cons(cons: list, cfg: dict) -> tuple[bool, str]:
     if k > cfg["max_contractions"]:
         return False, "FAIL"
     shrink = all(d[i] <= d[i - 1] * (1 + cfg["contraction_tolerance"]) for i in range(1, k)) and d[-1] < d[0]
-    if not shrink or d[-1] > cfg["max_last_depth"]:
+    if not shrink:
         return False, "FAIL"
     return True, "OK"
+
+
+def _confirmed(df: pd.DataFrame, last_c, cfg: dict) -> bool:
+    """末段低点之后已守住 confirm_bars 根，且收盘反弹过末段的一半 → 这个 Base 确认。"""
+    n = len(df)
+    if n - 1 - last_c.trough_idx < cfg["confirm_bars"]:
+        return False
+    after = df["close"].to_numpy()[last_c.trough_idx + 1:]
+    if after.size == 0 or after.min() < last_c.trough:
+        return False
+    return bool(after.max() >= last_c.trough + (last_c.peak - last_c.trough) * 0.5)
 
 
 def segment_bases(df: pd.DataFrame, cfg: dict, stage: dict | None = None) -> list[Base]:
@@ -311,9 +339,11 @@ def segment_bases(df: pd.DataFrame, cfg: dict, stage: dict | None = None) -> lis
         current = end >= n
         if no > cfg["max_bases"]:
             ok, st = False, "LATE"
+        conf = False
         if current and ok:
-            st = "CONFIRMED"
-        bases.append(Base(no, b0, end, float(h[b0]), float(l[b0:end].min()), cons, ok, st, current))
+            conf = _confirmed(df, cons[-1], cfg)
+            st = "CONFIRMED" if conf else "UNCONFIRMED"
+        bases.append(Base(no, b0, end, float(h[b0]), float(l[b0:end].min()), cons, ok, st, current, conf))
     return bases
 
 
@@ -321,20 +351,29 @@ def segment_bases(df: pd.DataFrame, cfg: dict, stage: dict | None = None) -> lis
 # 3. 成交量
 # ----------------------------------------------------------------------------
 def volume_info(df: pd.DataFrame, cfg: dict) -> dict:
-    v = df["volume"]
-    vma = float(v.rolling(cfg["volume_ma"], min_periods=10).mean().iloc[-1] or 0)
-    last = df.iloc[-1]
-    lv = float(last["volume"])
+    v = df["volume"].to_numpy()
+    vma_s = pd.Series(v).rolling(cfg["volume_ma"], min_periods=10).mean().to_numpy()
+    vma = float(vma_s[-1]) if np.isfinite(vma_s[-1]) else 0.0
+    o, c = df["open"].to_numpy(), df["close"].to_numpy()
+    lv = float(v[-1])
     ratio = lv / vma if vma > 0 else 0.0
-    level = "HIGH" if ratio >= cfg["vol_high"] else ("LOW" if ratio < cfg["vol_low"] else "NORMAL")
-    bull = last["close"] >= last["open"]
-    kind = "EXPANSION" if ratio >= cfg["vol_expansion"] else ("QUIET" if ratio < cfg["vol_quiet"] else "NORMAL")
-    recent = float(v.iloc[-5:].mean())
-    trend = "EXPANDING" if recent > vma * 1.1 else ("CONTRACTING" if recent < vma * 0.9 else "FLAT")
+    level = "STRONG" if ratio >= cfg["vol_strong"] else ("NORMAL" if ratio >= 1.0 else "WEAK")
+    spike = ratio >= cfg["vol_spike"]
+    candle = ("BULL_EXPANSION" if c[-1] >= o[-1] else "BEAR_EXPANSION") if spike else "NEUTRAL"
+    recent = float(v[-5:].mean())
+    trend = "EXPANDING" if recent > vma * 1.1 else ("CONTRACTING" if recent < vma * 0.9 else "STABLE")
+    # 近期（最近 recent_vol_bars 根）有没有放量阳线 / 放量阴线
+    k = min(cfg["recent_vol_bars"], len(v))
+    rv, rm = v[-k:], vma_s[-k:]
+    big = np.where(np.isfinite(rm) & (rm > 0), rv / np.where(rm > 0, rm, 1), 0) >= cfg["vol_spike"]
+    bull_spike = bool(np.any(big & (c[-k:] >= o[-k:])))
+    bear_spike = bool(np.any(big & (c[-k:] < o[-k:])))
+    per_day = BARS_PER_DAY.get(cfg.get("exec_tf", "4h"), 6)
     return {
         "last": lv, "ma": vma, "ratio": ratio, "level": level,
-        "raw": lv / float(last["close"]) if last["close"] else 0.0,
-        "est24h": vma * 6, "trend": trend, "candle": f"{'BULL' if bull else 'BEAR'}_{kind}",
+        "raw": lv / float(c[-1]) if c[-1] else 0.0,
+        "est24h": vma * per_day, "day": float(v[-per_day:].sum()),
+        "trend": trend, "candle": candle, "bull_spike": bull_spike, "bear_spike": bear_spike,
         "liq_cap": lv * cfg["liquidity_cap_pct"],
     }
 
@@ -343,7 +382,7 @@ def volume_info(df: pd.DataFrame, cfg: dict) -> dict:
 # 4. 核心：对“当前这一刻”做完整分析（不含突破判断）
 # ----------------------------------------------------------------------------
 def _core(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, cfg: dict) -> Signal:
-    sig = Signal(symbol=symbol)
+    sig = Signal(symbol=symbol, tf=cfg.get("exec_tf", "4h"))
     sig.last_close = float(df["close"].iloc[-1])
     sig.stage = stage_info(d1, cfg)
     if not sig.stage["s2"]:
@@ -381,10 +420,7 @@ def _core(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, cfg: dict) -> Signal:
         sig.reasons.append(f"当前 Base {cur.label()}：收缩不合格 {depths(cur)}")
     if sig.last_close < last_c.trough:
         sig.reasons.append("已跌破末段收缩低点")
-    risk_ok = sig.risk_pct <= cfg["max_risk_pct"]
-    if not risk_ok:
-        sig.reasons.append(f"入场风险 {sig.risk_pct * 100:.1f}% > {cfg['max_risk_pct'] * 100:.0f}%（Minervini：止损不超过 10%）")
-    sig.valid = sig.stage["s2"] and cur.ok and sig.last_close >= last_c.trough and risk_ok
+    sig.valid = sig.stage["s2"] and cur.ok and sig.last_close >= last_c.trough
     return sig
 
 
@@ -406,10 +442,57 @@ def upper_wick(df: pd.DataFrame, cfg: dict) -> Optional[int]:
     return None
 
 
+def c_points(b: Base, breakout: bool, cfg: dict) -> tuple[float, list]:
+    """C 收缩分（不含长上影线）。"""
+    cc, cr = 0.0, []
+    c1 = b.cons[0].depth
+    if c1 < cfg["small_c1_pct"]:
+        cc -= 0.5
+        cr.append("C1偏小")
+    else:
+        cr.append(f"C1={c1 * 100:.1f}%")
+    if b.confirmed:
+        cc += 1.0
+        cr.append("Base确认")
+    else:
+        cc += 0.5
+        cr.append("Base未确认")
+    rank_pts = {1: 0.5, 2: 1.5, 3: 0.0}
+    if b.no in rank_pts and b.no <= cfg["max_bases"]:
+        cc += rank_pts[b.no]
+        cr.append(f"第{b.no}Base")
+    else:
+        cc -= 2.0
+        cr.append(f"第{b.no}Base(太晚) -2")
+    if breakout:
+        cc += 1.0
+        cr.append("Pivot突破")
+    return cc, cr
+
+
+def v_points(bull_spike: bool, bear_spike: bool, day_volume: float, cfg: dict) -> tuple[float, list]:
+    """V 成交量分：近期阳放 +1；阴足放量 -2；两个都没有 = 0（无量，拿不到这 1 分）；日成交额太小 -2。"""
+    vv, vr = 0.0, []
+    if bull_spike:
+        vv += 1.0
+        vr.append("近期阳放")
+    if bear_spike:
+        vv -= 2.0
+        vr.append("阴足放量")
+    if day_volume < cfg["min_daily_volume"]:
+        vv -= 2.0
+        vr.append(f"日成交额{day_volume / 1e6:.2f}M<{cfg['min_daily_volume'] / 1e6:g}M 流动性差 -2")
+    return vv, vr
+
+
 def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
     """
-    扣分制：S / C / V 三项各自加减分，最后每项按正负记 +1 / -1，合计就是 Score（满分 3）。
-    师父的四条扣分：不在 Stage 2、无量（成交额没超过 MA50）、长上影线、日成交额不到 100 万。
+    SCV（从师父 9 个报告反推，每个例子都对得上）：
+      S 结构：Stage2 +1.0（不在 Stage2 -2.0）；执行周期收盘 > MA50 > MA150 > MA200（Close确认排列）+0.5
+      C 收缩：C1 在 20%~35% 记 0，C1偏小（<20%）-0.5；Base确认 +1.0 / 未确认 +0.5；
+              第1Base +0.5、第2Base +1.5、第3Base 0；Pivot突破 +1.0；长上影线 -1.0
+      V 成交量：近期阳放 +1.0；阴足放量 -2.0；都没有 = 0（“无量”就拿不到这 1 分）；日成交额 < 100 万 -2.0
+    每项正数 +1、0 记 0、负数 -1，合计 = Score（满分 3）
     """
     # S 结构
     s, sr = 0.0, []
@@ -425,70 +508,24 @@ def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
     if len(seq) >= 3 and all(a > b for a, b in zip(seq, seq[1:])):
         s += 0.5
         sr.append("Close确认排列")
-    elif mas and seq[0] < seq[1]:
-        s -= 0.5
-        sr.append("收盘在MA50下 -0.5")
-    if sig.stage.get("adv", 0) >= cfg["advance_bonus_pct"]:
-        s += 0.5
-        sr.append(f"前期涨幅{sig.stage['adv'] * 100:.0f}%")
     # C 收缩
     b = sig.base
-    cc, cr = 0.0, []
-    if b and b.cons:
-        if b.cons[0].depth <= cfg["small_c1_pct"]:
-            cc += 0.5
-            cr.append("C1偏小")
-        if b.ok:
-            cc += 1.0
-            cr.append("Base确认")
-        else:
-            cc -= 1.0
-            cr.append(f"Base未确认({b.status}) -1")
-        if b.no <= cfg["max_bases"]:
-            cc += 0.5
-            cr.append(f"第{b.no}Base")
-        else:
-            cc -= 2.0
-            cr.append(f"第{b.no}Base(超过{cfg['max_bases']}个) -2")
-        if breakout:
-            cc += 1.0
-            cr.append("Pivot突破")
+    cc, cr = c_points(b, breakout, cfg) if b and b.cons else (0.0, [])
     wick = upper_wick(df, cfg)
     if wick is not None:
-        cc -= 2.0
-        cr.append(f"长上影线({'最新K线' if wick == 0 else f'{wick}根前'}) -2")
+        cc -= 1.0
+        cr.append(f"长上影线({'最新K线' if wick == 0 else f'{wick}根前'}) -1")
     # V 成交量
     vi = volume_info(df, cfg)
-    vi["day"] = float(df["volume"].iloc[-6:].sum())          # 最近 24h（6 根 4h）实际成交额
     sig.vol = vi
-    vv, vr = 0.0, []
-    if vi["candle"] == "BEAR_EXPANSION":
-        vv -= 2.0
-        vr.append("阴足放量 -2")
-    if breakout:
-        if vi["ratio"] <= 1.0:
-            vv -= 2.0
-            vr.append(f"无量突破(成交额{vi['ratio']:.2f}x 未超MA50) -2")
-        elif vi["ratio"] >= cfg["vol_high"]:
-            vv += 2.0
-            vr.append("突破放量")
-        else:
-            vv += 1.0
-            vr.append("突破量超MA50")
-    elif vi["candle"] == "BULL_EXPANSION":
-        vv += 0.5
-        vr.append("阳足放量")
-    elif vi["candle"] == "BEAR_QUIET":
-        vv += 0.5
-        vr.append("阴足缩量")
-    if b and len(b.cons) >= 2 and b.cons[-1].avg_volume < b.cons[0].avg_volume:
-        vv += 1.0
-        vr.append("末段量缩")
-    if vi["day"] < cfg["min_daily_volume"]:
-        vv -= 2.0
-        vr.append(f"日成交额{vi['day'] / 1e6:.2f}M<{cfg['min_daily_volume'] / 1e6:g}M 流动性差 -2")
+    vv, vr = v_points(vi["bull_spike"], vi["bear_spike"], vi["day"], cfg)
     sig.s, sig.c, sig.v = (s, sr), (cc, cr), (vv, vr)
     _finalize(sig)
+
+
+def passes(sig: Signal, cfg: dict) -> bool:
+    """评级和分数都达标才做（纪律：低分不做）。"""
+    return RATINGS.index(sig.rating) >= RATINGS.index(cfg["min_rating"]) and sig.score >= cfg["min_score"]
 
 
 def _finalize(sig: Signal) -> None:
@@ -502,8 +539,11 @@ def _size(sig: Signal, cfg: dict) -> None:
         return
     tag = "NEW_LISTING" if sig.stage.get("new") else "MATURE"
     factor, rule = 1.0, "NORMAL_SIZE"
-    if RATINGS.index(sig.rating) < RATINGS.index(cfg["min_rating"]) or sig.risk_pct > cfg["max_risk_pct"]:
+    last_c = sig.base.cons[-1].depth if sig.base and sig.base.cons else 0
+    if not passes(sig, cfg):
         factor, rule = 0.0, "SKIP"
+    elif sig.risk_pct > cfg["max_risk_pct"] or last_c > cfg["half_size_last_c"]:
+        factor, rule = 0.5, "HALF_SIZE"
     acct = float(cfg["account_usdt"])
     notional = acct * cfg["risk_per_trade_pct"] / sig.risk_pct * factor
     notes = []
@@ -556,38 +596,25 @@ def analyze(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, config: Optional[di
             sig.reasons.append(f"距入场还有 {gap * 100:.1f}%")
         elif sig.valid and gap < 0:
             sig.reasons.append("已在入场价上方但没有收盘突破信号")
-    if sig.status != "NONE" and RATINGS.index(sig.rating) < RATINGS.index(cfg["min_rating"]):
-        sig.reasons.append(f"评级 {sig.rating} 低于 {cfg['min_rating']}")
+    if sig.status != "NONE" and not passes(sig, cfg):
+        sig.reasons.append(f"Score {sig.score}（{sig.rating}）未达标")
         sig.status = "NONE"
     return sig
 
 
 def apply_rs(sig: Signal, rs: int, cfg: Optional[dict] = None) -> None:
-    """扫描完所有币后，把 RS 排名补进趋势模板和 S 分。"""
+    """扫描完所有币后补上 RS 排名：RS < min_rs（弱于大部分币）→ S 扣 1 分。"""
     cfg = {**DEFAULTS, **(cfg or {})}
     sig.rs = rs
     ok = rs >= cfg["min_rs"]
     sig.stage.setdefault("checks", {})[f"RS≥{cfg['min_rs']}"] = ok
-    s, sr = sig.s
     if not ok:
-        s -= 1.0
-        sr = sr + [f"RS{rs}偏弱 -1"]
-        if sig.stage.get("s2"):
-            sig.stage["s2"] = False
-            sig.stage["label"] = sig.stage["label"].replace("S2", "S2-")
-            sig.stage["why"] = (sig.stage.get("why", "") + f"，RS {rs} < {cfg['min_rs']}").lstrip("，")
-        sig.valid = False
-        if sig.status != "NONE":
-            sig.status = "NONE"
-            sig.reasons.append(f"RS 相对强度 {rs} < {cfg['min_rs']}")
-    elif rs >= cfg["strong_rs"]:
-        s += 0.5
-        sr = sr + [f"RS{rs}强"]
-    sig.s = (s, sr)
-    _finalize(sig)
+        s, sr = sig.s
+        sig.s = (s - 1.0, sr + [f"RS{rs}偏弱 -1"])
+        _finalize(sig)
     _size(sig, cfg)
-    if sig.status != "NONE" and RATINGS.index(sig.rating) < RATINGS.index(cfg["min_rating"]):
-        sig.reasons.append(f"评级 {sig.rating} 低于 {cfg['min_rating']}")
+    if sig.status != "NONE" and not passes(sig, cfg):
+        sig.reasons.append(f"Score {sig.score}（{sig.rating}）未达标")
         sig.status = "NONE"
 
 
@@ -631,7 +658,7 @@ def replay(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, lookback: int, confi
         res = by[cfg["exit_profile"]]
         trades.append({"symbol": symbol, "idx": i, "time": t.iloc[i], "fill": fill, "sig": sig,
                        "score": sig.score, "rating": sig.rating,
-                       "taken": RATINGS.index(sig.rating) >= RATINGS.index(cfg["min_rating"]),
+                       "taken": passes(sig, cfg),
                        "by_profile": by, **res})
         i = res["exit_idx"] + 1
     return trades
@@ -641,7 +668,10 @@ def simulate(df: pd.DataFrame, i: int, fill: float, sig: Signal, cfg: dict, prof
     """按出场方案模拟。同一根K线既碰止损又碰目标时，保守地算先止损。"""
     prof = prof or PROFILES[cfg["exit_profile"]]
     h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
-    ma = df["close"].rolling(prof["trail_ma"]).mean().to_numpy() if prof["trail_ma"] else None
+    per_day = BARS_PER_DAY.get(cfg.get("exec_tf", "4h"), 6)
+    trail = prof["trail_days"] * per_day if prof["trail_days"] else None
+    after = prof["partial_after_days"] * per_day if prof["partial_after_days"] else None
+    ma = df["close"].rolling(trail).mean().to_numpy() if trail else None
     R = fill - sig.stop
     stop, part, realized, peak = sig.stop, 1.0, 0.0, fill
     be_done = partial_done = False
@@ -659,7 +689,7 @@ def simulate(df: pd.DataFrame, i: int, fill: float, sig: Signal, cfg: dict, prof
             realized += prof["partial_pct"] * prof["partial_r"]
             part -= prof["partial_pct"]
             partial_done, be_done, stop = True, True, max(stop, fill)
-        if prof["partial_after_bars"] and not partial_done and j - i >= prof["partial_after_bars"] and c[j] > fill:
+        if after and not partial_done and j - i >= after and c[j] > fill:
             realized += prof["partial_pct"] * (c[j] - fill) / R
             part -= prof["partial_pct"]
             partial_done, be_done, stop = True, True, max(stop, fill)

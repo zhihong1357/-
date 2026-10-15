@@ -25,7 +25,7 @@ import yaml
 
 from vcp.chart import plot_signal
 from vcp.data import ExchangeError, drop_unclosed, get_exchange
-from vcp.engine import DEFAULTS, PROFILES, analyze, apply_rs, replay, rs_percentiles
+from vcp.engine import DEFAULTS, PROFILES, analyze, apply_rs, replay, rs_percentiles, tf_config
 from vcp.notify import Notifier, find_chat_id
 from vcp.report import case_text, display_symbol, signal_text
 
@@ -81,20 +81,26 @@ def save_state(s: dict) -> None:
     STATE.write_text(json.dumps(s, indent=1), encoding="utf-8")
 
 
-def fetch(ex, symbol: str, sc: dict):
-    df = drop_unclosed(ex.klines(symbol, sc["exec_tf"], sc["exec_bars"]), sc["exec_tf"])
-    d1 = drop_unclosed(ex.klines(symbol, sc["stage_tf"], sc["stage_bars"]), sc["stage_tf"])
-    return df, d1
+def exec_tfs(cfg: dict) -> list:
+    return list(cfg["strategy"].get("exec_tfs") or [cfg["strategy"]["exec_tf"]])
 
 
-def analyse(ex, symbol: str, cfg: dict):
+def analyse(ex, symbol: str, cfg: dict) -> list:
+    """一个币：日线拉一次，每个执行周期各分析一次。返回 [(tf, df, signal, trades), ...]"""
     sc = cfg["strategy"]
-    df, d1 = fetch(ex, symbol, sc)
-    sig = analyze(symbol, df, d1, sc)
-    trades = []
-    if cfg["validation"].get("enabled", True):
-        trades = replay(symbol, df, d1, cfg["validation"]["lookback_bars"], sc)
-    return df, sig, trades
+    d1 = drop_unclosed(ex.klines(symbol, sc["stage_tf"], sc["stage_bars"]), sc["stage_tf"])
+    out = []
+    for tf in exec_tfs(cfg):
+        tc = tf_config(sc, tf)
+        df = drop_unclosed(ex.klines(symbol, tf, tc["exec_bars"]), tf)
+        sig = analyze(symbol, df, d1, tc)
+        trades = []
+        if cfg["validation"].get("enabled", True):
+            trades = replay(symbol, df, d1, cfg["validation"]["lookback_bars"], tc)
+            for t in trades:
+                t["tf"] = tf
+        out.append((tf, df, sig, trades))
+    return out
 
 
 def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
@@ -107,7 +113,9 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
             and s.replace("-", "").replace("_", "").upper().replace("SWAP", "") not in excl]
     if cfg.get("max_symbols"):
         syms = syms[: cfg["max_symbols"]]
-    print(f"[{datetime.now():%Y-%m-%d %H:%M}] 交易所: {ex.name}  阶段 {sc['stage_tf']} / 执行 {sc['exec_tf']}  "
+    tfs = exec_tfs(cfg)
+    tcs = {tf: tf_config(sc, tf) for tf in tfs}
+    print(f"[{datetime.now():%Y-%m-%d %H:%M}] 交易所: {ex.name}  阶段 {sc['stage_tf']} / 执行 {'/'.join(tfs)}  "
           f"扫描 {len(syms)} 个 USDT 永续合约 ...")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
@@ -121,11 +129,11 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
         for i, fut in enumerate(as_completed(futs), 1):
             s = futs[fut]
             try:
-                df, sig, tr = fut.result()
-                results.append(sig)
-                if sig.valid or tr:
-                    frames[s] = df
-                trades += tr
+                for tf, df, sig, tr in fut.result():
+                    results.append(sig)
+                    if sig.valid or tr:
+                        frames[(s, tf)] = df
+                    trades += tr
             except Exception as e:
                 print(f"  {s}: 获取失败 {e}")
             if i % 50 == 0:
@@ -138,7 +146,7 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     pct = rs_percentiles({r.symbol: r.rs_raw for r in results})
     for r in results:
         if r.symbol in pct:
-            apply_rs(r, pct[r.symbol], sc)
+            apply_rs(r, pct[r.symbol], tcs[r.tf])
 
     table = pd.DataFrame([r.to_row() for r in results]).sort_values(["valid", "score"], ascending=False)
     table.to_csv(run_dir / "all_results.csv", index=False, encoding="utf-8-sig")
@@ -154,20 +162,22 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     if not hits:
         print("本轮没有接近入场 / 突破的 VCP。")
     for r in hits:
-        print(f"[{r.status:8}] {display_symbol(r.symbol):16} {r.rating:9} {r.score}/3  "
+        print(f"[{r.status:8}] {display_symbol(r.symbol):16} {r.tf:4} {r.rating:9} Score {r.score}  "
               f"B{r.base.no} {r.stage['label']}  Entry {r.entry:.6g}  Stop {r.stop:.6g}")
         img = None
         if cfg.get("charts", "all") != "none":
-            img = str(run_dir / f"{display_symbol(r.symbol)}_{r.status}.png")
-            plot_signal(frames[r.symbol], r, img, tf=sc["exec_tf"], title_extra=r.status)
-        key = f"{ex.name}|{r.symbol}|B{r.base.no}|{r.status}|{r.entry:.6g}"
+            img = str(run_dir / f"{display_symbol(r.symbol)}_{r.tf}_{r.status}.png")
+            plot_signal(frames[(r.symbol, r.tf)], r, img, tf=r.tf, title_extra=r.status)
+        key = f"{ex.name}|{r.symbol}|{r.tf}|B{r.base.no}|{r.status}|{r.entry:.6g}"
+        seen = f"seen|{ex.name}|{r.symbol}|{r.tf}|B{r.base.no}"      # 同一个 Base 之前提醒过 → 信号更新
         if r.status in alert_on and key not in state:
             if notifier.enabled:
-                notifier.send(signal_text(r, sc, ex.name), img)
-            state[key] = time.time()
+                notifier.send(signal_text(r, tcs[r.tf], ex.name, new=seen not in state), img)
+            state[key] = state[seen] = time.time()
             new_alerts += 1
     if watch:
-        print("\n观察名单（Base 已确认、离入场还远）: " + ", ".join(display_symbol(r.symbol) for r in watch[:20]))
+        print("\n观察名单（形态合格、离入场还远）: "
+              + ", ".join(f"{display_symbol(r.symbol)}({r.tf})" for r in watch[:20]))
     print("=" * 70)
     save_state(state)
 
@@ -177,18 +187,23 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     if notifier.enabled and cfg.get("send_summary", True) and due:
         state["_last_summary"] = time.time()
         save_state(state)
-        s2 = sum(bool(r.stage.get("s2")) for r in results)
-        conf = sum(bool(r.base and r.base.ok) for r in results)
-        lines = [f"📊 VCP 扫描完成 ({ex.name} · 阶段 {sc['stage_tf']} / 执行 {sc['exec_tf']})",
-                 f"交易所共 {len(vols)} 个 USDT 永续，成交额达标并扫描 {len(results)} 个",
-                 f"日线 Stage 2: {s2} 个",
-                 f"当前 Base 已确认(CONFIRMED): {conf} 个",
+        n_sym = len({r.symbol for r in results})
+        s2 = len({r.symbol for r in results if r.stage.get("s2")})
+        lines = [f"📊 VCP 扫描完成 ({ex.name} · 阶段 {sc['stage_tf']} / 执行 {'/'.join(tfs)})",
+                 f"交易所共 {len(vols)} 个 USDT 永续，成交额达标并扫描 {n_sym} 个",
+                 f"日线 Stage 2: {s2} 个"]
+        for tf in tfs:
+            rs_ = [r for r in results if r.tf == tf]
+            lines.append(f"{tf}: 形态合格 {sum(r.valid for r in rs_)} | Base确认 "
+                         f"{sum(bool(r.base and r.base.confirmed) for r in rs_)} | 信号 "
+                         f"{sum(r.status != 'NONE' for r in rs_)}")
+        lines += [
                  f"突破 BREAKOUT: {sum(r.status == 'BREAKOUT' for r in hits)} 个",
                  f"接近入场 SETUP: {sum(r.status == 'SETUP' for r in hits)} 个"]
         if hits:
-            lines.append("信号: " + ", ".join(f"{display_symbol(r.symbol)}({r.score}/3)" for r in hits[:15]))
+            lines.append("信号: " + ", ".join(f"{display_symbol(r.symbol)}({r.tf} {r.score}分)" for r in hits[:15]))
         if watch:
-            lines.append("观察名单: " + ", ".join(display_symbol(r.symbol) for r in watch[:10]))
+            lines.append("观察名单: " + ", ".join(f"{display_symbol(r.symbol)}({r.tf})" for r in watch[:10]))
         if cfg["validation"].get("enabled", True):
             lines += ["", *validation_stats(trades, cfg)]
         notifier.send("\n".join(lines))
@@ -224,7 +239,7 @@ def _bucket_line(label: str, ts: list) -> str:
 
 def validation_stats(trades: list, cfg: dict) -> list[str]:
     sc, look = cfg["strategy"], cfg["validation"]["lookback_bars"]
-    span = f"最近 {look} 根 {sc['exec_tf']}"
+    span = f"每个周期最近 {look} 根K线"
     if not trades:
         return [f"🧪 历史回放({span}): 这段时间没有触发过入场"]
     taken = [t for t in trades if t["taken"]]
@@ -234,6 +249,9 @@ def validation_stats(trades: list, cfg: dict) -> list[str]:
            f"低分被过滤 {len(skipped)} 次",
            _bucket_line("✅ 高分（照做）", taken),
            _bucket_line("🚫 低分（不做）", skipped),
+           "按执行周期（只算高分）:",
+           *["  " + _bucket_line(tf, [t for t in taken if t.get("tf") == tf]) for tf in exec_tfs(cfg)
+             if any(t.get("tf") == tf for t in taken)],
            "按分数分组（检验扣分制是否有效：分数越高结果应越好）:"]
     for sc_ in (3, 2, 1, 0, -1, -2, -3):
         g = [t for t in trades if t["score"] == sc_]
@@ -250,8 +268,8 @@ def validation_stats(trades: list, cfg: dict) -> list[str]:
         win = sum(x["r"] > 0 for x in res)
         out.append(f"{mark}{prof['name']}: {len(res)} 笔，盈利 {win} 笔，平均 {avg:+.2f}R，合计 {sum(x['r'] for x in res):+.1f}R")
     for t in sorted(trades, key=lambda t: t["time"], reverse=True)[:10]:
-        out.append(f"{ICON.get(t['outcome'], '•')} {display_symbol(t['symbol'])} "
-                   f"{pd.Timestamp(t['time']):%m-%d %H:%M} {t['score']}/3 {t['outcome']} {t['r']:+.2f}R"
+        out.append(f"{ICON.get(t['outcome'], '•')} {display_symbol(t['symbol'])} {t.get('tf', '')} "
+                   f"{pd.Timestamp(t['time']):%m-%d %H:%M} {t['score']}分 {t['outcome']} {t['r']:+.2f}R"
                    f"{'' if t['taken'] else ' (低分不做)'}")
     out.append("说明：统计不含手续费/资金费/滑点；RS 排名只在实时扫描计算，回放里不含 RS")
     return out
@@ -268,21 +286,23 @@ def send_cases(trades, frames, cfg, ex_name, run_dir, notifier, state):
     wins = [t for t in recent if t["success"]]
     cases = wins[:k] + [t for t in recent if not t["success"]][: max(0, k - len(wins))]
     for t in cases:
-        df = frames[t["symbol"]]
+        tf = t.get("tf", sc["exec_tf"])
+        tc = tf_config(sc, tf)
+        df = frames[(t["symbol"], tf)]
         d0 = pd.Timestamp(t["time"]).strftime("%Y%m%d_%H%M")
-        print(f"  历史案例 {display_symbol(t['symbol'])} {d0} {t['outcome']} {t['r']:+.2f}R")
-        key = f"case2|{ex_name}|{t['symbol']}|{d0}|{t['outcome']}"
+        print(f"  历史案例 {display_symbol(t['symbol'])} {tf} {d0} {t['outcome']} {t['r']:+.2f}R")
+        key = f"case3|{ex_name}|{t['symbol']}|{tf}|{d0}|{t['outcome']}"
         if key in state or not notifier.enabled:
             continue
         img = None
         if cfg.get("charts", "all") != "none":
-            img = str(run_dir / f"CASE_{display_symbol(t['symbol'])}_{d0}.png")
+            img = str(run_dir / f"CASE_{display_symbol(t['symbol'])}_{tf}_{d0}.png")
             end = min(len(df), t["exit_idx"] + 20)
-            plot_signal(df.iloc[:end], t["sig"], img, tf=sc["exec_tf"],
+            plot_signal(df.iloc[:end], t["sig"], img, tf=tf,
                         title_extra=f"HISTORY {EN.get(t['outcome'], '')} {t['r']:+.2f}R",
                         entry_idx=t["idx"], exit_idx=None if t["open"] else t["exit_idx"],
                         outcome=EN.get(t["outcome"], ""))
-        notifier.send(case_text(t, df, sc, ex_name), img)
+        notifier.send(case_text(t, df, tc, ex_name), img)
         state[key] = time.time()
 
 
@@ -294,17 +314,18 @@ def single(cfg: dict, symbol: str):
         alt = {"okx": symbol.replace("USDT", "-USDT-SWAP"), "gate": symbol.replace("USDT", "_USDT")}.get(ex.name)
         if alt in vols:
             symbol = alt
-    df, sig, trades = analyse(ex, symbol, cfg)
     sc = cfg["strategy"]
-    print(signal_text(sig, sc, ex.name))
-    print("（单币模式没有其他币可比，RS 相对强度不计算；完整扫描时才会排名）")
-    if sig.reasons:
-        print("\n未触发信号的原因: " + "; ".join(sig.reasons))
-    print("\n" + "\n".join(validation_stats(trades, cfg)))
     OUT.mkdir(exist_ok=True)
-    img = str(OUT / f"{display_symbol(symbol)}_analysis.png")
-    plot_signal(df, sig, img, tf=sc["exec_tf"], title_extra=sig.status)
-    print(f"\n图表: {img}")
+    for tf, df, sig, trades in analyse(ex, symbol, cfg):
+        print("\n" + "=" * 60)
+        print(signal_text(sig, tf_config(sc, tf), ex.name))
+        if sig.reasons:
+            print("\n未触发信号的原因: " + "; ".join(sig.reasons))
+        img = str(OUT / f"{display_symbol(symbol)}_{tf}_analysis.png")
+        plot_signal(df, sig, img, tf=tf, title_extra=sig.status)
+        print(f"图表: {img}")
+        print("\n" + "\n".join(validation_stats(trades, cfg)))
+    print("（单币模式没有其他币可比，RS 相对强度不计算；完整扫描时才会排名）")
 
 
 def demo(cfg: dict):

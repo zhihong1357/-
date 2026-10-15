@@ -34,9 +34,9 @@ def test_breakout_scores_pivot_and_volume():
     df, d1 = make_two_base_4h(breakout=True)
     s = analyze("X", df, d1)
     assert s.status == "BREAKOUT"
-    assert "Pivot突破" in s.c[1]
-    assert s.c[0] == 3.0                      # C1偏小 + Base确认 + 第2Base + Pivot突破，和师父的例子一致
-    assert s.rating in ("GOOD", "EXCELLENT")
+    assert "Pivot突破" in s.c[1] and "近期阳放" in s.v[1]
+    # C1偏小(-0.5) + Base确认(+1) + 第2Base(+1.5) + Pivot突破(+1) = 3.0，和师父 CTRUSDT 一样
+    assert s.c[0] == 3.0
 
 
 def test_position_size_risks_one_percent():
@@ -110,18 +110,18 @@ def test_minervini_partial_then_trailing_exit():
     assert abs(res["r"] - 1.5) < 1e-6
 
 
-def test_risk_over_10pct_is_skipped():
+def test_risk_over_10pct_is_half_size():
     df, d1 = make_two_base_4h()
     s = analyze("X", df, d1, {"max_risk_pct": 0.03})
-    assert not s.valid and s.status == "NONE" and s.size["rule"].endswith("SKIP")
+    assert s.valid and s.size["rule"].endswith("HALF_SIZE")
 
 
-def test_low_rs_demotes_signal():
+def test_low_rs_is_deducted():
     df, d1 = make_two_base_4h()
     s = analyze("X", df, d1)
-    assert s.status == "SETUP"
+    before = s.s[0]
     apply_rs(s, 40)
-    assert s.status == "NONE" and not s.stage["s2"] and s.rs == 40
+    assert s.rs == 40 and s.s[0] == before - 1.0 and any("RS40" in x for x in s.s[1])
 
 
 def test_score_is_sign_sum_like_master_example():
@@ -135,13 +135,13 @@ def test_score_is_sign_sum_like_master_example():
 def test_full_marks_breakout():
     df, d1 = make_two_base_4h(breakout=True)
     s = analyze("X", df, d1)
-    assert s.status == "BREAKOUT" and s.score == 3 and s.rating == "EXCELLENT"
+    assert s.status == "BREAKOUT" and s.score == 3 and s.rating == "STRONG"
 
 
-def test_breakout_without_volume_is_deducted():
+def test_breakout_without_volume_gets_no_v_point():
     df, d1 = make_two_base_4h(breakout=True, breakout_vol=1e5)    # 突破K线成交额远低于 MA50
     s = analyze("X", df, d1)
-    assert any("无量突破" in x for x in s.v[1]) and s.v[0] < 0 and s.score <= 1
+    assert s.v[0] <= 0 and s.score <= 2                             # 无量 → V 拿不到 +1
 
 
 def test_long_upper_wick_is_deducted():
@@ -162,3 +162,41 @@ def test_replay_records_score_buckets():
     df, d1 = make_two_base_4h(breakout=True, follow=40)
     trades = replay("X", df, d1, 300)
     assert trades and all("score" in t and "taken" in t for t in trades)
+
+
+# 师父的 7 个做多信号（MUUUSDT 是做空，暂不做）：(C1, Base确认?, 第几个Base, Pivot突破?, 近期阳放?, 阴足放量?, 收盘排列?) → (S, C, V, Score)
+MASTER = {
+    "AERO": (0.207, True, 1, True, True, False, True, (1.5, 2.5, 1.0, 3)),
+    "SOON": (0.214, False, 3, True, False, False, True, (1.5, 1.5, 0.0, 2)),
+    "PHA": (0.256, False, 1, False, False, False, True, (1.5, 1.0, 0.0, 2)),
+    "BTW": (0.327, False, 3, False, False, True, False, (1.0, 0.5, -2.0, 1)),
+    "CTR": (0.168, True, 2, True, False, True, True, (1.5, 3.0, -2.0, 1)),
+    "UAI": (0.220, False, 1, True, False, True, False, (1.0, 2.0, -2.0, 1)),
+    "NMR": (0.216, False, 1, False, False, False, False, (1.0, 1.0, 0.0, 2)),
+}
+
+
+def test_scoring_matches_all_master_examples():
+    from vcp.detector import Contraction
+    from vcp.engine import Base, Signal, _finalize, c_points, v_points
+    cfg = DEFAULTS
+    for name, (c1, conf, no, pivot, bull, bear, aligned, (S, C, V, score)) in MASTER.items():
+        b = Base(no, 0, 10, 1, 0.5, [Contraction(0, 1, 5, 1 - c1, c1, 1)], True,
+                 "CONFIRMED" if conf else "UNCONFIRMED", True, conf)
+        cc, _ = c_points(b, pivot, cfg)
+        vv, _ = v_points(bull, bear, 1e8, cfg)
+        sig = Signal(name)
+        sig.s, sig.c, sig.v = (1.0 + (0.5 if aligned else 0), []), (cc, []), (vv, [])
+        _finalize(sig)
+        assert (sig.s[0], cc, vv, sig.score) == (S, C, V, score), name
+        assert sig.rating == ("STRONG" if score == 3 else "GOOD"), name
+
+
+def test_multi_timeframe_config():
+    from vcp.engine import tf_config
+    c30 = tf_config(DEFAULTS, "30m")
+    assert c30["exec_tf"] == "30m" and c30["entry_buffer"] == 0.0025
+    assert tf_config(DEFAULTS, "4h")["entry_buffer"] == 0.005
+    df, d1 = make_two_base_4h()
+    s = analyze("X", df, d1, c30)
+    assert s.tf == "30m" and abs(s.vol["est24h"] - s.vol["ma"] * 48) < 1e-6
