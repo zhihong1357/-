@@ -69,8 +69,13 @@ DEFAULTS = {
     "vol_high": 1.5,
     "vol_low": 0.7,
     "liquidity_cap_pct": 0.10,      # 单笔上限 = 最新 4h 成交额的 10%
-    # 评级
-    "min_rating": "FAIR",           # 低于这个评级不提醒：WEAK < FAIR < GOOD < EXCELLENT
+    # 扣分项（师父的做法：走满分，慢慢扣分）
+    "min_daily_volume": 1_000_000,  # 最近 24h 成交额 < 100 万 USDT → 流动性差，扣分
+    "wick_lookback": 3,             # 检查最近 3 根 4h（含突破K线）有没有长上影线
+    "wick_ratio": 0.5,              # 上影线 ≥ 整根K线长度的 50% 视为长上影线
+    "wick_min_range": 0.5,          # K线长度至少是近 20 根平均长度的 0.5 倍才算（忽略很小的K线）
+    # 评级（Score = S、C、V 三项各 +1/-1 的合计，满分 3）
+    "min_rating": "GOOD",           # 低于这个评级不提醒：WEAK < FAIR < GOOD < STRONG < EXCELLENT
     # 仓位
     "account_usdt": 1000,
     "risk_per_trade_pct": 0.01,
@@ -80,7 +85,8 @@ DEFAULTS = {
     "max_hold_bars": 180,           # 最多持有 180 根 4h（30 天）
 }
 
-RATINGS = ["WEAK", "FAIR", "GOOD", "EXCELLENT"]
+RATINGS = ["WEAK", "FAIR", "GOOD", "STRONG", "EXCELLENT"]
+SCORE_RATING = {3: "EXCELLENT", 2: "STRONG", 1: "GOOD", 0: "FAIR"}
 
 # 出场方案（R = 入场价 - 止损价）。历史回放对同一批入场三种都算，方便比较哪种在加密货币上更好。
 PROFILES = {
@@ -96,14 +102,13 @@ PROFILES = {
 }
 
 
-def rating_of(total: float) -> str:
-    if total >= 4:
-        return "EXCELLENT"
-    if total >= 2:
-        return "GOOD"
-    if total >= 0.5:
-        return "FAIR"
-    return "WEAK"
+def rating_of(score: int) -> str:
+    """Score = S/C/V 三项的正负号合计：三项全过 3 分 EXCELLENT，扣到 1 分 GOOD（师父例子），负分 WEAK。"""
+    return SCORE_RATING.get(score, "WEAK" if score < 0 else "EXCELLENT")
+
+
+def _sign(x: float) -> int:
+    return 1 if x > 0 else (-1 if x < 0 else 0)
 
 
 # ----------------------------------------------------------------------------
@@ -143,7 +148,8 @@ class Signal:
     s: tuple = (0.0, [])
     c: tuple = (0.0, [])
     v: tuple = (0.0, [])
-    total: float = 0.0
+    total: float = 0.0                       # S+C+V 细分合计（参考用）
+    score: int = 0                           # 满分 3：S、C、V 每项 +1/0/-1
     rating: str = "WEAK"
     vol: dict = field(default_factory=dict)
     size: dict = field(default_factory=dict)
@@ -157,7 +163,7 @@ class Signal:
         b = self.base
         return {
             "symbol": self.symbol, "status": self.status, "valid": self.valid, "rating": self.rating,
-            "score": self.total, "stage": self.stage.get("label"), "base": f"B{b.no}" if b else "",
+            "score": self.score, "detail_total": self.total, "rs": self.rs, "stage": self.stage.get("label"), "base": f"B{b.no}" if b else "",
             "pattern": pattern_text(b), "entry": self.entry, "stop": self.stop, "plan_tp": self.plan_tp,
             "chart_tp": self.chart_tp, "risk_pct": self.risk_pct, "last_close": self.last_close,
             "reasons": "; ".join(self.reasons),
@@ -386,7 +392,25 @@ def depths(b: Base) -> str:
     return " ".join(f"C{i + 1}:{c.depth * 100:.1f}%" for i, c in enumerate(b.cons))
 
 
+def upper_wick(df: pd.DataFrame, cfg: dict) -> Optional[int]:
+    """最近 wick_lookback 根里有长上影线就返回它距今几根（0 = 最新一根），没有返回 None。"""
+    o, h, l, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
+    rng = h - l
+    avg = pd.Series(rng).rolling(20, min_periods=5).mean().to_numpy()
+    for k in range(min(cfg["wick_lookback"], len(df))):
+        j = len(df) - 1 - k
+        if rng[j] <= 0 or rng[j] < avg[j] * cfg["wick_min_range"]:
+            continue
+        if (h[j] - max(o[j], c[j])) / rng[j] >= cfg["wick_ratio"]:
+            return k
+    return None
+
+
 def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
+    """
+    扣分制：S / C / V 三项各自加减分，最后每项按正负记 +1 / -1，合计就是 Score（满分 3）。
+    师父的四条扣分：不在 Stage 2、无量（成交额没超过 MA50）、长上影线、日成交额不到 100 万。
+    """
     # S 结构
     s, sr = 0.0, []
     if sig.stage.get("s2"):
@@ -394,7 +418,7 @@ def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
         sr.append("Stage2")
     else:
         s -= 2.0
-        sr.append(f"非Stage2({sig.stage.get('label')})")
+        sr.append(f"非Stage2({sig.stage.get('label')}) -2")
     c = df["close"]
     mas = [c.rolling(k).mean().iloc[-1] for k in (50, 150, 200) if len(df) >= k]
     seq = [float(c.iloc[-1])] + [float(m) for m in mas]
@@ -403,7 +427,7 @@ def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
         sr.append("Close确认排列")
     elif mas and seq[0] < seq[1]:
         s -= 0.5
-        sr.append("收盘在MA50下")
+        sr.append("收盘在MA50下 -0.5")
     if sig.stage.get("adv", 0) >= cfg["advance_bonus_pct"]:
         s += 0.5
         sr.append(f"前期涨幅{sig.stage['adv'] * 100:.0f}%")
@@ -417,38 +441,60 @@ def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
         if b.ok:
             cc += 1.0
             cr.append("Base确认")
+        else:
+            cc -= 1.0
+            cr.append(f"Base未确认({b.status}) -1")
         if b.no <= cfg["max_bases"]:
             cc += 0.5
             cr.append(f"第{b.no}Base")
         else:
             cc -= 2.0
-            cr.append(f"第{b.no}Base(超过{cfg['max_bases']}个，失效)")
+            cr.append(f"第{b.no}Base(超过{cfg['max_bases']}个) -2")
         if breakout:
             cc += 1.0
             cr.append("Pivot突破")
+    wick = upper_wick(df, cfg)
+    if wick is not None:
+        cc -= 2.0
+        cr.append(f"长上影线({'最新K线' if wick == 0 else f'{wick}根前'}) -2")
     # V 成交量
     vi = volume_info(df, cfg)
+    vi["day"] = float(df["volume"].iloc[-6:].sum())          # 最近 24h（6 根 4h）实际成交额
     sig.vol = vi
     vv, vr = 0.0, []
     if vi["candle"] == "BEAR_EXPANSION":
         vv -= 2.0
-        vr.append("阴足放量")
-    elif vi["candle"] == "BULL_EXPANSION":
-        if breakout and vi["ratio"] >= cfg["vol_high"]:
+        vr.append("阴足放量 -2")
+    if breakout:
+        if vi["ratio"] <= 1.0:
+            vv -= 2.0
+            vr.append(f"无量突破(成交额{vi['ratio']:.2f}x 未超MA50) -2")
+        elif vi["ratio"] >= cfg["vol_high"]:
             vv += 2.0
             vr.append("突破放量")
         else:
             vv += 1.0
-            vr.append("阳足放量")
+            vr.append("突破量超MA50")
+    elif vi["candle"] == "BULL_EXPANSION":
+        vv += 0.5
+        vr.append("阳足放量")
     elif vi["candle"] == "BEAR_QUIET":
         vv += 0.5
         vr.append("阴足缩量")
     if b and len(b.cons) >= 2 and b.cons[-1].avg_volume < b.cons[0].avg_volume:
         vv += 1.0
         vr.append("末段量缩")
+    if vi["day"] < cfg["min_daily_volume"]:
+        vv -= 2.0
+        vr.append(f"日成交额{vi['day'] / 1e6:.2f}M<{cfg['min_daily_volume'] / 1e6:g}M 流动性差 -2")
     sig.s, sig.c, sig.v = (s, sr), (cc, cr), (vv, vr)
-    sig.total = round(s + cc + vv, 2)
-    sig.rating = rating_of(sig.total)
+    _finalize(sig)
+
+
+def _finalize(sig: Signal) -> None:
+    sig.total = round(sig.s[0] + sig.c[0] + sig.v[0], 2)
+    sig.score = _sign(sig.s[0]) + _sign(sig.c[0]) + _sign(sig.v[0])
+    sig.rating = rating_of(sig.score)
 
 
 def _size(sig: Signal, cfg: dict) -> None:
@@ -456,7 +502,7 @@ def _size(sig: Signal, cfg: dict) -> None:
         return
     tag = "NEW_LISTING" if sig.stage.get("new") else "MATURE"
     factor, rule = 1.0, "NORMAL_SIZE"
-    if sig.rating == "WEAK" or sig.risk_pct > cfg["max_risk_pct"]:
+    if RATINGS.index(sig.rating) < RATINGS.index(cfg["min_rating"]) or sig.risk_pct > cfg["max_risk_pct"]:
         factor, rule = 0.0, "SKIP"
     acct = float(cfg["account_usdt"])
     notional = acct * cfg["risk_per_trade_pct"] / sig.risk_pct * factor
@@ -525,7 +571,7 @@ def apply_rs(sig: Signal, rs: int, cfg: Optional[dict] = None) -> None:
     s, sr = sig.s
     if not ok:
         s -= 1.0
-        sr = sr + [f"RS{rs}偏弱"]
+        sr = sr + [f"RS{rs}偏弱 -1"]
         if sig.stage.get("s2"):
             sig.stage["s2"] = False
             sig.stage["label"] = sig.stage["label"].replace("S2", "S2-")
@@ -538,8 +584,7 @@ def apply_rs(sig: Signal, rs: int, cfg: Optional[dict] = None) -> None:
         s += 0.5
         sr = sr + [f"RS{rs}强"]
     sig.s = (s, sr)
-    sig.total = round(sig.s[0] + sig.c[0] + sig.v[0], 2)
-    sig.rating = rating_of(sig.total)
+    _finalize(sig)
     _size(sig, cfg)
     if sig.status != "NONE" and RATINGS.index(sig.rating) < RATINGS.index(cfg["min_rating"]):
         sig.reasons.append(f"评级 {sig.rating} 低于 {cfg['min_rating']}")
@@ -577,15 +622,16 @@ def replay(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, lookback: int, confi
         if not (sig.valid and sig.entry) or c[i - 1] >= sig.entry or h[i] < sig.entry:
             i += 1
             continue
-        _score(sig, sub, cfg, breakout=False)
-        if RATINGS.index(sig.rating) < RATINGS.index(cfg["min_rating"]):
-            i += 1
-            continue
+        # 分数按“突破K线收盘时”计算（那时才看得到突破量和上影线）；不在这里按分数过滤，
+        # 这样回放能比较高分和低分的真实结果，检验扣分制是否有效
+        _score(sig, df.iloc[: i + 1], cfg, breakout=True)
         _size(sig, cfg)
         fill = max(sig.entry, o[i])
         by = {name: simulate(df, i, fill, sig, cfg, prof) for name, prof in PROFILES.items()}
         res = by[cfg["exit_profile"]]
         trades.append({"symbol": symbol, "idx": i, "time": t.iloc[i], "fill": fill, "sig": sig,
+                       "score": sig.score, "rating": sig.rating,
+                       "taken": RATINGS.index(sig.rating) >= RATINGS.index(cfg["min_rating"]),
                        "by_profile": by, **res})
         i = res["exit_idx"] + 1
     return trades

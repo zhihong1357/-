@@ -31,7 +31,8 @@ def signal_text(sig, cfg: dict, ex_name: str, head: str | None = None) -> str:
         f"Stage TF 阶段周期: {cfg['stage_tf']}",
         "Direction 方向: LONG",
         f"Rating 评级: {sig.rating}",
-        f"Score 分数: {sig.total:+.1f}",
+        f"Score 分数: {sig.score} / 3  (S{_sign_txt(sig.s[0])} C{_sign_txt(sig.c[0])} V{_sign_txt(sig.v[0])}；"
+        f"满分 3，每项被扣成负数记 -1；需 ≥ {cfg['min_rating']})",
         "",
         f"Stage 阶段: {st.get('label', '-')} ({st.get('bars', 0)} D1 bars)",
         "Trend Template 趋势模板: " + (" ".join(f"{'✅' if v else '❌'}{k}" for k, v in st.get("checks", {}).items()) or "-"),
@@ -78,6 +79,7 @@ def signal_text(sig, cfg: dict, ex_name: str, head: str | None = None) -> str:
         f"Raw Volume 原始成交量: {v.get('raw', 0):,.0f}",
         f"Est 24h Volume 估算24h: {fmoney(v.get('est24h'))}",
         f"Vol Trend 量能趋势: {v.get('trend', '-')} | Candle K线量: {v.get('candle', '-')}",
+        f"24h Volume 最近24h成交额: {fmoney(v.get('day'))} (需 ≥ {fmoney(cfg['min_daily_volume'])})",
         f"Liquidity Cap 单笔上限: {fmoney(v.get('liq_cap'))} ({'OK' if sz.get('cap_ok', True) else 'CAPPED'})",
         f"Near Entry 接近入场: {'YES' if sig.near_entry else 'NO'}",
     ]
@@ -112,6 +114,10 @@ def exit_logic(prof: dict, cfg: dict) -> str:
 
 def fqty(q: float) -> str:
     return f"{q:,.0f}" if q >= 100 else f"{q:.4g}"
+
+
+def _sign_txt(x: float) -> str:
+    return "+1" if x > 0 else ("-1" if x < 0 else "0")
 
 
 def _scv(name: str, part) -> str:

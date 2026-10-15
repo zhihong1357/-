@@ -128,7 +128,7 @@ def plot_signal(df: pd.DataFrame, sig, path: str, tf: str = "4h", title_extra: s
         f"Base {b.no if b else '-'} {b.status if b else ''} | {cdet}",
         f"Bases: {hist}",
         f"Advance: {sig.stage.get('adv', 0) * 100:+.0f}%  D1 MA{sig.stage.get('ma', 150)}: {fp(sig.stage.get('ma_val'))}",
-        f"SCV: {sig.total:+.1f} {sig.rating}  (S{sig.s[0]:+.1f} C{sig.c[0]:+.1f} V{sig.v[0]:+.1f})",
+        f"SCV: {sig.score}/3 {sig.rating}  (S{sig.s[0]:+.1f} C{sig.c[0]:+.1f} V{sig.v[0]:+.1f})",
         f"Last {tf} Vol: {fmoney(sig.vol.get('last'))}  ({sig.vol.get('ratio', 0):.2f}x MA50)",
         f"Est 24h Vol: {fmoney(sig.vol.get('est24h'))}",
     ]
