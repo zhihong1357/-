@@ -47,11 +47,18 @@ strategy:
   exec_bars: 900                  # 4h 拉 900 根（约 150 天，要覆盖整段大涨才能正确数 Base）
   stage_bars: 400                 # 日线拉 400 根
 
-  # 1) 阶段（日线）：大涨 ≥100% + 收盘在 MA150 上方 = Stage 2
-  min_advance_pct: 1.0            # 起涨低点 → 之后的最高点涨幅 ≥ 100%（对数K线上即翻倍）
-  advance_lookback: 365           # 在最近 365 根日线里找这段大涨
-  stage_ma: 150                   # 收盘在日线 MA150 上方（上市不足 150 天用 MA50，不足 50 天用 MA20）
-  new_listing_bars: 200           # 日线不足 200 根 = 新币，标记 NEW
+  # 1) 阶段（日线）：Minervini 趋势模板 8 条
+  #    价格>MA150且>MA200；MA150>MA200；MA200 向上至少 1 个月；MA50>MA150且>MA200；价格>MA50；
+  #    距 52 周低点 ≥30%；距 52 周高点 ≤25%；RS 相对强度 ≥70
+  new_listing_bars: 200           # 日线不足 200 根 = 新币 NEW（只用算得出来的均线）
+  ma_slow_rising_bars: 20         # MA200 向上：比 20 根（约 1 个月）前高；Minervini 更偏好 4~5 个月
+  min_above_low_pct: 0.30
+  max_below_high_pct: 0.25
+  min_rs: 70                      # RS = 在本次扫描的所有币里的强弱排名（1~99）
+  strong_rs: 85                   # RS ≥ 85 加分
+  advance_lookback: 365           # 找起涨低点的范围（也是数 Base 的起点）
+  advance_bonus_pct: 1.0          # 前期涨幅 ≥ 100%（翻倍）→ S 加分
+  require_advance: false          # true = 前期翻倍变成硬性条件（比 Minervini 更严格）
 
   # 2) Base 与收缩（4h）
   #    C1 = Base 最高点 → 回调最低点；之后每段收缩的低点必须比上一段高（没抬高就并入上一段）
@@ -63,15 +70,18 @@ strategy:
   max_contractions: 6
   max_bases: 2                    # 超过 2 个 Base 判定失效（LATE）
   max_first_depth: 0.35           # C1 ≤ 35%（Minervini 原版）
-  max_last_depth: 0.15            # 最后一段 ≤ 15%
+  max_last_depth: 0.10            # 最后一段 ≤ 10%（Minervini：末段通常是个位数的紧密收缩）
   contraction_tolerance: 0.10     # 后一段可比前一段大 10%（相对）以内
   small_c1_pct: 0.20              # C1 ≤ 20% → “C1偏小”加分
 
   # 3) 进场 / 止损 / 止盈
   entry_buffer: 0.005             # 挂单缓冲：Entry = Pivot × 1.005
   stop_buffer: 0.005              # Stop = 末段收缩低点 × 0.995
-  be_r: 0.8                       # 涨到 Entry + 0.8R → 止损移到入场价（保本）
-  plan_r: 5                       # 计划止盈 Plan TP = Entry + 5R
+  # 出场方案（R = 入场价 - 止损价），历史回放会三种都算一遍做对比：
+  #   minervini   ：+2R 止损移到保本；+3R 卖一半；剩下 4h 收盘跌破 MA120（≈日线 20MA）离场
+  #   master      ：师父报告的参数，+0.8R 保本，+5R 全部止盈
+  #   qullamaggie ：持有 18 根 4h（3 天）后若盈利卖一半并保本；剩下跌破 MA60（≈日线 10MA）离场
+  exit_profile: minervini
   chart_tp_lookback: 180          # 结构止盈 Chart TP = 最近 180 根 4h 的最高点
   near_entry_pct: 0.03            # 现价在 Entry 下方 3% 内 → SETUP（接近入场）
   max_extension_pct: 0.03         # 已高出 Entry 3% 以上不再提醒（防追高）
@@ -92,7 +102,7 @@ account:
   account_usdt: 1000              # 你的账户资金（USDT）
   risk_per_trade_pct: 0.01        # 每笔打到止损最多亏账户 1%
   max_leverage: 5                 # 仓位最多 5 倍杠杆
-  max_risk_pct: 0.10              # 入场风险 > 10% → 半仓（HALF_SIZE）
+  max_risk_pct: 0.10              # 入场风险 > 10% → 不做（Minervini：单笔止损不超过 10%）
 
 # ---------- 历史回放（用同一套规则重演过去行情，验证信号是否真的有效） ----------
 validation:
