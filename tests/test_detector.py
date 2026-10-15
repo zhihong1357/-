@@ -200,3 +200,29 @@ def test_multi_timeframe_config():
     df, d1 = make_two_base_4h()
     s = analyze("X", df, d1, c30)
     assert s.tf == "30m" and abs(s.vol["est24h"] - s.vol["ma"] * 48) < 1e-6
+
+
+def test_every_exchange_supports_every_timeframe():
+    # 回归测试：曾经因为数据接口没有 30m 导致整次扫描失败
+    from vcp.data import INTERVAL_MS, INTERVALS
+    from vcp.engine import TF_DEFAULTS
+    for tf in list(TF_DEFAULTS) + ["1d"]:
+        assert tf in INTERVAL_MS, tf
+        for ex, m in INTERVALS.items():
+            assert tf in m, (ex, tf)
+
+
+def test_one_failing_timeframe_keeps_the_others(monkeypatch):
+    import scanner
+    from tests.synthetic import make_two_base_4h
+    df, d1 = make_two_base_4h()
+
+    class Ex:
+        def klines(self, s, tf, n):
+            if tf == "30m":
+                raise KeyError("30m")
+            return d1 if tf == "1d" else df
+    monkeypatch.setattr(scanner, "drop_unclosed", lambda d, tf: d)
+    cfg = scanner.load_config("config.yaml")
+    out = scanner.analyse(Ex(), "X", cfg)
+    assert [tf for tf, *_ in out] == ["4h", "1h"]

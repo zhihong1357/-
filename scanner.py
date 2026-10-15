@@ -90,16 +90,25 @@ def analyse(ex, symbol: str, cfg: dict) -> list:
     sc = cfg["strategy"]
     d1 = drop_unclosed(ex.klines(symbol, sc["stage_tf"], sc["stage_bars"]), sc["stage_tf"])
     out = []
+    errors = []
     for tf in exec_tfs(cfg):
-        tc = tf_config(sc, tf)
-        df = drop_unclosed(ex.klines(symbol, tf, tc["exec_bars"]), tf)
-        sig = analyze(symbol, df, d1, tc)
-        trades = []
-        if cfg["validation"].get("enabled", True):
-            trades = replay(symbol, df, d1, cfg["validation"]["lookback_bars"], tc)
-            for t in trades:
-                t["tf"] = tf
-        out.append((tf, df, sig, trades))
+        # 每个周期单独处理：某个周期出错，不影响其他周期的结果
+        try:
+            tc = tf_config(sc, tf)
+            df = drop_unclosed(ex.klines(symbol, tf, tc["exec_bars"]), tf)
+            sig = analyze(symbol, df, d1, tc)
+            trades = []
+            if cfg["validation"].get("enabled", True):
+                trades = replay(symbol, df, d1, cfg["validation"]["lookback_bars"], tc)
+                for t in trades:
+                    t["tf"] = tf
+            out.append((tf, df, sig, trades))
+        except Exception as e:
+            errors.append(f"{tf}: {type(e).__name__} {e}")
+    if errors and not out:
+        raise RuntimeError("；".join(errors))
+    for err in errors:
+        print(f"  {symbol} {err}")
     return out
 
 
@@ -135,11 +144,12 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
                         frames[(s, tf)] = df
                     trades += tr
             except Exception as e:
-                print(f"  {s}: 获取失败 {e}")
+                print(f"  {s}: 获取失败 {type(e).__name__} {e}")
             if i % 50 == 0:
                 print(f"  已完成 {i}/{len(syms)}")
     if not results:
         print("没有拿到任何数据")
+        notifier.send(f"⚠️ VCP 扫描失败：{len(syms)} 个合约全部获取失败（交易所 {ex.name}），请查看 GitHub Actions 运行记录")
         return pd.DataFrame()
 
     # RS 相对强度：在本次扫描的所有币里排名（Minervini 趋势模板第 8 条）
