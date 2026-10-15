@@ -14,7 +14,7 @@ def _path(points, rng, noise=0.006):
     return np.array(closes)
 
 
-def make_vcp(breakout=False, seed=7):
+def make_vcp(breakout=False, seed=7, follow=0):
     rng = np.random.default_rng(seed)
     pts = [(0, 10), (200, 16), (70, 30),  # 上升趋势
            (12, 21), (14, 29),            # T1 -30%
@@ -30,6 +30,11 @@ def make_vcp(breakout=False, seed=7):
         close = np.append(close, 29.4)
         vol = np.append(vol, 3e6)
         n += 1
+    if follow:  # 突破后继续上涨 follow 根K线
+        up = np.linspace(close[-1], close[-1] * 1.35, follow + 1)[1:]
+        close = np.append(close, up)
+        vol = np.append(vol, np.full(follow, 1.4e6))
+        n += follow
     openp = np.r_[close[0], close[:-1]]
     high = np.maximum(openp, close) * (1 + rng.uniform(0.001, 0.008, n))
     low = np.minimum(openp, close) * (1 - rng.uniform(0.001, 0.008, n))
