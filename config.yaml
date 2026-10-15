@@ -44,21 +44,24 @@ discord:
 strategy:
   exec_tf: 4h                     # 执行周期：找 Base / 收缩 / 进场
   stage_tf: 1d                    # 阶段周期：判断是否 Stage 2
-  exec_bars: 600                  # 4h 拉 600 根（约 100 天）
+  exec_bars: 900                  # 4h 拉 900 根（约 150 天，要覆盖整段大涨才能正确数 Base）
   stage_bars: 400                 # 日线拉 400 根
 
-  # 1) 阶段（日线，Minervini 趋势模板）
-  new_listing_bars: 200           # 日线不足 200 根 = 新币 NEW（用 MA50/MA20 判断趋势）
-  min_above_low_pct: 0.30         # 现价 ≥ 52 周低点 × 1.30
-  max_below_high_pct: 0.25        # 现价 ≥ 52 周高点 × 0.75
+  # 1) 阶段（日线）：大涨 ≥100% + 收盘在 MA150 上方 = Stage 2
+  min_advance_pct: 1.0            # 起涨低点 → 之后的最高点涨幅 ≥ 100%（对数K线上即翻倍）
+  advance_lookback: 365           # 在最近 365 根日线里找这段大涨
+  stage_ma: 150                   # 收盘在日线 MA150 上方（上市不足 150 天用 MA50，不足 50 天用 MA20）
+  new_listing_bars: 200           # 日线不足 200 根 = 新币，标记 NEW
 
   # 2) Base 与收缩（4h）
+  #    C1 = Base 最高点 → 回调最低点；之后每段收缩的低点必须比上一段高（没抬高就并入上一段）
   base_min_depth: 0.08            # 从高点回撤 ≥ 8% 才算开始一个新 Base（B1、B2…）
   base_min_bars: 10               # Base 至少 10 根 4h K线
   zigzag_pct: 0.03                # 摆动点灵敏度 3%
   recovery_ratio: 0.35            # 反弹收回上段跌幅 ≥ 35% 才算新一段收缩
   min_contractions: 2
   max_contractions: 6
+  max_bases: 2                    # 超过 2 个 Base 判定失效（LATE）
   max_first_depth: 0.35           # C1 ≤ 35%（Minervini 原版）
   max_last_depth: 0.15            # 最后一段 ≤ 15%
   contraction_tolerance: 0.10     # 后一段可比前一段大 10%（相对）以内

@@ -2,10 +2,12 @@
 多周期 VCP 引擎（日线判断阶段 + 4 小时找收缩和进场），输出格式参照“师父”的信号报告。
 
 流程：
-  1. Stage（日线）：Minervini 趋势模板 → S1/S2/S3/S4；上市不足 200 根日线标记为 NEW
-  2. Base（4h）：从最近的大低点开始，按“回撤 ≥ base_min_depth 开始一个 Base，收盘创新高结束”
-     把上涨过程切成 B1、B2、B3…，每个 Base 内再用 ZigZag 拆成 C1、C2…（收缩）
-  3. 当前 Base 合格（2~6 次收缩、逐次变小、C1 ≤ 35%、末段 ≤ 15%）→ CONFIRMED
+  1. Stage（日线）：先有一段 ≥100% 的大涨（对数K线上翻倍），且收盘在日线 MA150 上方 → Stage 2；
+     上市不足 200 根日线标记为 NEW
+  2. Base（4h）：从那段大涨的起涨低点开始，按“回撤 ≥ base_min_depth 开始一个 Base，收盘创新高结束”
+     切成 B1、B2…；超过 2 个 Base 判定失效（LATE）
+  3. 每个 Base：C1 = 最高点 → 回调最低点；之后每段收缩的低点必须更高（没抬高就并入前一段）；
+     合格（2~6 次收缩、逐次变小、C1 ≤ 35%、末段 ≤ 15%）→ CONFIRMED
   4. Pivot = 最后一次收缩的高点；Entry = Pivot × (1 + 挂单缓冲)；Stop = 末段低点 × (1 - 缓冲)
   5. SCV 打分：S 结构 / C 收缩 / V 成交量，合计 → 评级
   6. 价格接近 Entry → SETUP；4h 收盘站上 Entry → BREAKOUT
@@ -26,13 +28,13 @@ DEFAULTS = {
     # 周期
     "exec_tf": "4h",
     "stage_tf": "1d",
-    "exec_bars": 600,               # 4h 拉 600 根 ≈ 100 天
+    "exec_bars": 900,               # 4h 拉 900 根 ≈ 150 天（要覆盖整段大涨才能正确数 Base）
     "stage_bars": 400,              # 日线拉 400 根
-    # 阶段（日线）
-    "new_listing_bars": 200,        # 日线不足 200 根（算不出 MA200）= 新币 NEW
-    "ma_slow_rising_bars": 20,
-    "min_above_low_pct": 0.30,
-    "max_below_high_pct": 0.25,
+    # 阶段（日线）：先有 ≥100% 的大涨，且收盘在 MA150 上方 = Stage 2
+    "new_listing_bars": 200,        # 日线不足 200 根 = 新币 NEW
+    "min_advance_pct": 1.00,        # 起涨低点 → 之后最高点 涨幅 ≥ 100%（对数K线上即翻倍）
+    "advance_lookback": 365,        # 在最近 365 根日线里找这段大涨
+    "stage_ma": 150,                # 收盘必须在日线 MA150 上方（不足 150 根用 MA50，再不足用 MA20）
     # Base / 收缩（4h）
     "base_min_depth": 0.08,         # 从高点回撤 ≥ 8% 才算开始一个 Base
     "base_min_bars": 10,            # Base 至少 10 根 4h K线
@@ -40,6 +42,7 @@ DEFAULTS = {
     "recovery_ratio": 0.35,         # 反弹收回上段跌幅 ≥ 35% 才算新的一段收缩
     "min_contractions": 2,
     "max_contractions": 6,
+    "max_bases": 2,                 # 超过 2 个 Base 判定失效（后期形态）
     "max_first_depth": 0.35,        # C1 ≤ 35%（Minervini 原版）
     "max_last_depth": 0.15,
     "contraction_tolerance": 0.10,
@@ -148,42 +151,56 @@ def pattern_text(b: Optional[Base]) -> str:
 # 1. 阶段（日线）
 # ----------------------------------------------------------------------------
 def stage_info(d1: pd.DataFrame, cfg: dict) -> dict:
+    """Stage 2 = 最近一段 ≥100% 的大涨（低点在前、高点在后）+ 日线收盘在 MA150 上方。"""
     n = len(d1)
-    if n < 30:
-        return {"label": "NEW/S?", "s2": False, "new": True, "bars": n, "why": "日线不足 30 根"}
+    if n < 20:
+        return {"label": "NEW/S?", "s2": False, "new": True, "bars": n, "why": "日线不足 20 根"}
     c = d1["close"]
     last = float(c.iloc[-1])
     new = n < cfg["new_listing_bars"]
-    yr = d1.iloc[-365:]
-    hi, lo = float(yr["high"].max()), float(yr["low"].min())
-    near_hi = last >= hi * (1 - cfg["max_below_high_pct"])
-    above_lo = last >= lo * (1 + cfg["min_above_low_pct"])
-    if new:
-        k = 50 if n >= 60 else 20
-        m = c.rolling(k).mean()
-        rising = m.iloc[-1] > m.iloc[-6]
-        s2 = bool(last > m.iloc[-1] and rising and near_hi and above_lo)
-        st = "S2" if s2 else ("S4" if last < m.iloc[-1] and not rising else "S1")
-        return {"label": f"NEW/{st}", "s2": s2, "new": True, "bars": n}
-    m50, m150, m200 = (c.rolling(k).mean() for k in (50, 150, 200))
-    rb = cfg["ma_slow_rising_bars"]
-    m200_up = m200.iloc[-1] > m200.iloc[-1 - rb]
-    m150_up = m150.iloc[-1] > m150.iloc[-1 - rb]
-    s2 = bool(last > m50.iloc[-1] > m150.iloc[-1] > m200.iloc[-1] and m200_up and near_hi and above_lo)
+    k = cfg["stage_ma"] if n >= cfg["stage_ma"] else (50 if n >= 50 else 20)
+    ma = float(c.rolling(k).mean().iloc[-1])
+    w = d1.iloc[-cfg["advance_lookback"]:].reset_index(drop=True)
+    hi_i = int(w["high"].to_numpy().argmax())
+    lo_i = int(w["low"].to_numpy()[: hi_i + 1].argmin())
+    lo, hi = float(w["low"].iloc[lo_i]), float(w["high"].iloc[hi_i])
+    adv = hi / lo - 1 if lo > 0 else 0.0
+    above = last > ma
+    big = adv >= cfg["min_advance_pct"]
+    s2 = bool(above and big)
     if s2:
         st = "S2"
-    elif last < m150.iloc[-1] and not m150_up:
-        st = "S4"
-    elif last > m200.iloc[-1] and not m150_up:
-        st = "S3"
+    elif not above:
+        st = "S4" if last < lo + (hi - lo) * 0.5 else "S3"
     else:
         st = "S1"
-    return {"label": st, "s2": s2, "new": False, "bars": n}
+    why = []
+    if not big:
+        why.append(f"涨幅 {adv * 100:.0f}% < {cfg['min_advance_pct'] * 100:.0f}%")
+    if not above:
+        why.append(f"收盘在日线 MA{k} 下方")
+    return {"label": f"NEW/{st}" if new else st, "s2": s2, "new": new, "bars": n, "ma": k, "ma_val": ma,
+            "adv": adv, "adv_low": lo, "adv_high": hi, "above_ma": above, "adv_low_time": w["time"].iloc[lo_i],
+            "why": "，".join(why)}
 
 
 # ----------------------------------------------------------------------------
 # 2. Base 切分（4h）
 # ----------------------------------------------------------------------------
+def merge_higher_lows(cons: list, vol: np.ndarray) -> list:
+    """VCP 要求每段收缩的低点比上一段高。某段低点没抬高 → 说明还是同一次回调，并入前一段。
+    这样 C1 永远是“从最高点到回调最低点”，之后的每个 C 都是更高的低点。"""
+    out = []
+    for c in cons:
+        while out and c.trough <= out[-1].trough:
+            p = out.pop()
+            peak_idx, peak = (p.peak_idx, p.peak) if p.peak >= c.peak else (c.peak_idx, c.peak)
+            v = float(vol[peak_idx:c.trough_idx + 1].mean())
+            c = type(c)(peak_idx, peak, c.trough_idx, c.trough, (peak - c.trough) / peak, v)
+        out.append(c)
+    return out
+
+
 def _eval_cons(cons: list, cfg: dict) -> tuple[bool, str]:
     k = len(cons)
     if k == 0:
@@ -201,12 +218,16 @@ def _eval_cons(cons: list, cfg: dict) -> tuple[bool, str]:
     return True, "OK"
 
 
-def segment_bases(df: pd.DataFrame, cfg: dict) -> list[Base]:
+def segment_bases(df: pd.DataFrame, cfg: dict, stage: dict | None = None) -> list[Base]:
     h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
     n = len(df)
     if n < 20:
         return []
-    start = int(np.argmin(l))                 # 这段行情的起涨低点
+    # 从日线那段 ≥100% 大涨的起涨低点开始数 Base（4h 数据不够早时用 4h 窗口内的最低点）
+    first = 0
+    if stage and stage.get("adv_low_time") is not None:
+        first = min(int((df["time"] < stage["adv_low_time"]).sum()), n - 1)
+    start = first + int(np.argmin(l[first:]))
     spans, rh, i = [], start, start
     while i < n:
         if h[i] >= h[rh]:
@@ -227,8 +248,11 @@ def segment_bases(df: pd.DataFrame, cfg: dict) -> list[Base]:
         cons = build_contractions(df.iloc[:end], b0, cfg)
         if len(cons) > 1 and cons[-1].depth < 0.005:
             cons = cons[:-1]
+        cons = merge_higher_lows(cons, df["volume"].to_numpy())
         ok, st = _eval_cons(cons, cfg)
         current = end >= n
+        if no > cfg["max_bases"]:
+            ok, st = False, "LATE"
         if current and ok:
             st = "CONFIRMED"
         bases.append(Base(no, b0, end, float(h[b0]), float(l[b0:end].min()), cons, ok, st, current))
@@ -265,8 +289,8 @@ def _core(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, cfg: dict) -> Signal:
     sig.last_close = float(df["close"].iloc[-1])
     sig.stage = stage_info(d1, cfg)
     if not sig.stage["s2"]:
-        sig.reasons.append(f"日线阶段 {sig.stage['label']}，不是 Stage 2")
-    sig.bases = segment_bases(df, cfg)
+        sig.reasons.append(f"日线阶段 {sig.stage['label']}，不是 Stage 2（{sig.stage.get('why', '')}）")
+    sig.bases = segment_bases(df, cfg, sig.stage)
     cur = sig.bases[-1] if sig.bases and sig.bases[-1].current else None
     sig.base = cur
     if cur is None:
@@ -291,7 +315,9 @@ def _core(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, cfg: dict) -> Signal:
     if hh > sig.entry * 1.01:
         sig.chart_tp = hh
         sig.struct_rr = (hh - sig.entry) / R
-    if not cur.ok:
+    if cur.status == "LATE":
+        sig.reasons.append(f"已是第 {cur.no} 个 Base，超过 {cfg['max_bases']} 个判定失效")
+    elif not cur.ok:
         sig.reasons.append(f"当前 Base {cur.label()}：收缩不合格 {depths(cur)}")
     if sig.last_close < last_c.trough:
         sig.reasons.append("已跌破末段收缩低点")
@@ -331,14 +357,12 @@ def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
         if b.ok:
             cc += 1.0
             cr.append("Base确认")
-        if b.no <= 2:
+        if b.no <= cfg["max_bases"]:
             cc += 0.5
             cr.append(f"第{b.no}Base")
-        elif b.no >= 4:
-            cc -= 1.0
-            cr.append(f"第{b.no}Base(后期)")
         else:
-            cr.append(f"第{b.no}Base")
+            cc -= 2.0
+            cr.append(f"第{b.no}Base(超过{cfg['max_bases']}个，失效)")
         if breakout:
             cc += 1.0
             cr.append("Pivot突破")
@@ -374,7 +398,7 @@ def _size(sig: Signal, cfg: dict) -> None:
     factor, rule = 1.0, "NORMAL_SIZE"
     if sig.rating == "WEAK":
         factor, rule = 0.0, "SKIP"
-    elif sig.risk_pct > cfg["max_risk_pct"] or (sig.base and sig.base.no >= 4):
+    elif sig.risk_pct > cfg["max_risk_pct"]:
         factor, rule = 0.5, "HALF_SIZE"
     acct = float(cfg["account_usdt"])
     notional = acct * cfg["risk_per_trade_pct"] / sig.risk_pct * factor

@@ -31,6 +31,9 @@ def signal_text(sig, cfg: dict, ex_name: str, head: str | None = None) -> str:
         f"Score 分数: {sig.total:+.1f}",
         "",
         f"Stage 阶段: {st.get('label', '-')} ({st.get('bars', 0)} D1 bars)",
+        f"Advance 大涨: {st.get('adv', 0) * 100:+.0f}% (${fp(st.get('adv_low'))} → ${fp(st.get('adv_high'))})"
+        f" | 需 ≥ {cfg['min_advance_pct'] * 100:.0f}% {'✅' if st.get('adv', 0) >= cfg['min_advance_pct'] else '❌'}",
+        f"D1 MA{st.get('ma', 150)}: ${fp(st.get('ma_val'))} | 收盘{'在上方 ✅' if st.get('above_ma') else '在下方 ❌'}",
         f"Pattern 收缩: {'-'.join(f'C{i + 1}' for i in range(len(b.cons))) if b else '-'}",
         f"Base Rank 基地编号: B{b.no} ({b.status})" if b else "Base Rank 基地编号: -",
         f"Base History 基地历史: {hist}",
