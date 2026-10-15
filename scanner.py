@@ -27,6 +27,7 @@ from vcp.chart import plot_vcp
 from vcp.data import ExchangeError, drop_unclosed, get_exchange
 from vcp.detector import DEFAULTS, detect_vcp
 from vcp.notify import Notifier, find_chat_id
+from vcp.trade import TRADE_DEFAULTS, VALIDATION_DEFAULTS, make_plan, validate_symbol
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "output"
@@ -48,12 +49,20 @@ def load_config(path: str) -> dict:
     if os.getenv("TELEGRAM_BOT_TOKEN"):
         tg["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
     if os.getenv("TELEGRAM_CHAT_ID"):
-        tg["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
+        # Secrets 里的 chat_id 和 config.yaml 里的 chat_id 合并，都会收到通知
+        ids = [str(tg.get("chat_id") or ""), os.getenv("TELEGRAM_CHAT_ID")]
+        merged = []
+        for x in ",".join(ids).replace("，", ",").split(","):
+            if x.strip() and x.strip() not in merged:
+                merged.append(x.strip())
+        tg["chat_id"] = ",".join(merged)
     if os.getenv("DISCORD_WEBHOOK_URL"):
         cfg.setdefault("discord", {})["webhook_url"] = os.getenv("DISCORD_WEBHOOK_URL")
     if os.getenv("VCP_EXCHANGE"):
         cfg["exchange"] = os.getenv("VCP_EXCHANGE")
     cfg["vcp"] = {**DEFAULTS, **(cfg.get("vcp") or {})}
+    cfg["trade"] = {**TRADE_DEFAULTS, **(cfg.get("trade") or {})}
+    cfg["validation"] = {**VALIDATION_DEFAULTS, **(cfg.get("validation") or {})}
     return cfg
 
 
@@ -85,7 +94,7 @@ def vs_pivot(r) -> float:
     return (r.last_close / r.pivot - 1) * 100
 
 
-def alert_text(r, ex_name: str, interval: str) -> str:
+def alert_text(r, ex_name: str, interval: str, plan=None, cfg=None) -> str:
     head = {"BREAKOUT": "🚀 VCP 带量突破", "SETUP": "👀 VCP 形态成立 · 接近突破点"}[r.status]
     lines = [
         f"{head}",
@@ -94,19 +103,48 @@ def alert_text(r, ex_name: str, interval: str) -> str:
         f"Pivot 突破价: {fmt_price(r.pivot)}  (现价相对 pivot {vs_pivot(r):+.2f}%)",
         f"收缩: {r.depths_text()}  (共 {len(r.contractions)} 次)",
         f"底部长度: {r.base_bars} 根K线",
-        f"参考止损(末段低点): {fmt_price(r.contractions[-1].trough)}",
     ]
     if r.breakout_volume_ratio:
         lines.append(f"突破量: {r.breakout_volume_ratio}x 均量")
     lines.append(f"评分: {r.score}")
-    lines.append("⚠️ 仅为形态提醒，非投资建议")
+    if plan is not None:
+        lines += ["", *plan_lines(plan, cfg, r.status)]
+    lines.append("⚠️ 规则化计算结果，非投资建议")
     return "\n".join(lines)
+
+
+def plan_lines(p, cfg: dict, status: str) -> list[str]:
+    t = cfg["trade"]
+    entry_how = ("突破K线已收盘确认，按收盘价进场" if status == "BREAKOUT" else
+                 f"在 pivot 上方 {t['entry_buffer']*100:.1f}% 挂突破单(buy stop)；"
+                 f"日线收盘不能站上 pivot 或量 < {cfg['vcp']['breakout_volume_ratio']}x 均量则撤单/离场")
+    out = [
+        "📐 交易计划（做多）",
+        f"进场: {fmt_price(p.entry)}",
+        f"止损: {fmt_price(p.stop)}  (-{p.risk_pct*100:.2f}%，末段收缩低点下方)",
+        f"止盈1: {fmt_price(p.tp1)}  (+{t['tp1_r']:g}R，+{p.risk_pct*t['tp1_r']*100:.2f}%) 平 {t['tp1_close_pct']*100:.0f}%",
+        f"止盈2: {fmt_price(p.tp2)}  (+{t['tp2_r']:g}R，+{p.risk_pct*t['tp2_r']*100:.2f}%) 全平",
+        f"盈亏比: 1 : {p.rr:g}",
+        f"风险仓位(账户 {t['account_usdt']:g}U，每笔风险 {t['risk_per_trade_pct']*100:g}%):",
+        f"  名义仓位 {p.notional:,.0f}U ≈ {p.qty:.6g} 个，{p.leverage:.0f}x 杠杆，保证金 {p.margin:,.0f}U",
+        f"  打到止损亏 {p.risk_usdt:,.1f}U",
+        f"进场逻辑: {entry_how}",
+        f"出场逻辑: 跌破止损全部离场；到止盈1平 {t['tp1_close_pct']*100:.0f}% 并把止损移到进场价(保本)；"
+        f"到止盈2全平；持仓满 {t['max_hold_bars']} 根K线仍未结束按收盘离场",
+    ]
+    if p.warn:
+        out.append(f"⚠️ {p.warn}")
+    return out
 
 
 def analyse(ex, symbol: str, cfg: dict):
     df = ex.klines(symbol, cfg["interval"], cfg["kline_limit"])
     df = drop_unclosed(df, cfg["interval"])
-    return df, detect_vcp(df, symbol, cfg["vcp"])
+    r = detect_vcp(df, symbol, cfg["vcp"])
+    trades = []
+    if cfg["validation"].get("enabled", True):
+        trades = validate_symbol(df, symbol, cfg["vcp"], cfg["trade"], cfg["validation"])
+    return df, r, trades
 
 
 def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
@@ -125,17 +163,18 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     run_dir = OUT / stamp
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    results, frames = [], {}
+    results, frames, trades = [], {}, []
     workers = 3 if ex.name == "okx" else 6
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(analyse, ex, s, cfg): s for s in syms}
         for i, fut in enumerate(as_completed(futs), 1):
             s = futs[fut]
             try:
-                df, r = fut.result()
+                df, r, tr = fut.result()
                 results.append(r)
-                if r.valid:
+                if r.valid or tr:
                     frames[s] = df
+                trades += tr
             except Exception as e:
                 print(f"  {s}: 获取失败 {e}")
             if i % 50 == 0:
@@ -162,14 +201,15 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     for r in hits:
         print(f"[{r.status:8}] {r.symbol:16} 收盘 {fmt_price(r.last_close):>10}  pivot {fmt_price(r.pivot):>10}"
               f"  相对pivot {vs_pivot(r):+6.2f}%  收缩 {r.depths_text()}  评分 {r.score}")
+        plan = make_plan(r, cfg["trade"])
         img = None
         if cfg.get("charts", "all") != "none":
             img = str(run_dir / f"{r.symbol}_{r.status}.png")
-            plot_vcp(frames[r.symbol], r, img, title=f"{r.symbol} ({ex.name} perp, {cfg['interval']})")
+            plot_vcp(frames[r.symbol], r, img, title=f"{r.symbol} ({ex.name} perp, {cfg['interval']})", plan=plan)
         key = f"{ex.name}|{r.symbol}|{cfg['interval']}|{r.status}|{fmt_price(r.pivot)}"
         if r.status in alert_on and key not in state:
             if notifier.enabled:
-                notifier.send(alert_text(r, ex.name, cfg["interval"]), img)
+                notifier.send(alert_text(r, ex.name, cfg["interval"], plan, cfg), img)
             state[key] = time.time()
     if forming:
         print(f"\n另有 {len(forming)} 个币形态成立但离 pivot 还远（观察名单）: "
@@ -192,12 +232,73 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
             lines.append("本轮没有符合 VCP 的合约")
         if watch:
             lines.append(f"观察名单(形态成立、离 pivot 还远): {watch}")
+        if cfg["validation"].get("enabled", True):
+            lines += ["", *validation_stats(trades, cfg)]
         notifier.send("\n".join(lines))
+
+    # 最近 N 个经历史验证成功的 VCP 案例（带完整交易计划和结果）
+    if cfg["validation"].get("enabled", True):
+        send_cases(trades, frames, cfg, ex.name, run_dir, notifier, state)
+        save_state(state)
+        pd.DataFrame([{k: v for k, v in t.items() if k not in ("plan", "result")} for t in trades]) \
+            .to_csv(run_dir / "validation_trades.csv", index=False, encoding="utf-8-sig")
 
     pd.DataFrame([r.to_row() for r in hits]).to_csv(run_dir / "signals.csv", index=False, encoding="utf-8-sig")
     table.to_csv(OUT / "latest_all_results.csv", index=False, encoding="utf-8-sig")
     print(f"结果已保存到: {run_dir}   用时 {time.time() - t0:.0f} 秒\n")
     return table
+
+
+def validation_stats(trades: list, cfg: dict) -> list[str]:
+    closed = [t for t in trades if not t["open"]]
+    n_open = len(trades) - len(closed)
+    look = cfg["validation"]["lookback_bars"]
+    if not trades:
+        return [f"🧪 历史验证(最近 {look} 根K线): 没有出现过 VCP 突破"]
+    wins = [t for t in closed if t["tp1_hit"]]
+    avg_r = sum(t["r"] for t in closed) / len(closed) if closed else 0
+    return [f"🧪 历史验证(最近 {look} 根K线，同一套规则回放):",
+            f"出现突破 {len(trades)} 次，已结束 {len(closed)} 次，持仓中 {n_open} 次",
+            f"到达止盈1(2R)比例: {len(wins)}/{len(closed)}"
+            + (f" = {len(wins)/len(closed)*100:.0f}%" if closed else ""),
+            f"平均每笔: {avg_r:+.2f}R（不含手续费/滑点）"]
+
+
+def send_cases(trades, frames, cfg, ex_name, run_dir, notifier, state):
+    k = cfg["validation"]["show_cases"]
+    wins = [t for t in trades if t["tp1_hit"]]
+    wins.sort(key=lambda t: t["time"], reverse=True)
+    cases = wins[:k]
+    if not cases:
+        print("历史验证：最近没有成功案例")
+        return
+    print(f"最近 {len(cases)} 个经验证成功的 VCP 案例:")
+    for n, t in enumerate(cases, 1):
+        p, r = t["plan"], t["result"]
+        df = frames[t["symbol"]]
+        d0 = pd.Timestamp(t["time"]).strftime("%Y-%m-%d")
+        d1 = pd.Timestamp(df["time"].iloc[t["exit_idx"]]).strftime("%Y-%m-%d")
+        print(f"  {t['symbol']} {d0} 结果 {t['outcome']} {t['r']:+.2f}R 最大涨幅 {t['max_gain_pct']}%")
+        key = f"case|{ex_name}|{t['symbol']}|{d0}|{t['outcome']}"
+        if key in state or not notifier.enabled:
+            continue
+        text = "\n".join([
+            f"✅ 已验证成功的 VCP 案例 #{n}",
+            f"{t['symbol']}  ({ex_name} 永续 · {cfg['interval']})",
+            f"突破日: {d0}   收缩: {t['depths']}   pivot: {fmt_price(t['pivot'])}",
+            f"结果: {t['outcome']}  {t['r']:+.2f}R   最大涨幅 {t['max_gain_pct']}%   结束日 {d1}",
+            "",
+            *plan_lines(p, cfg, "BREAKOUT"),
+            "⚠️ 历史案例用于理解规则，不代表未来结果",
+        ])
+        img = None
+        if cfg.get("charts", "all") != "none":
+            img = str(run_dir / f"CASE_{t['symbol']}_{d0}.png")
+            end = min(len(df), t["exit_idx"] + 15)
+            plot_vcp(df.iloc[:end], r, img, title=f"CASE {t['symbol']} {d0} ({ex_name}, {cfg['interval']})",
+                     plan=p, entry_idx=t["idx"], exit_idx=t["exit_idx"])
+        notifier.send(text, img)
+        state[key] = time.time()
 
 
 def single(cfg: dict, symbol: str):
@@ -207,7 +308,7 @@ def single(cfg: dict, symbol: str):
         alt = {"okx": symbol.replace("USDT", "-USDT-SWAP"), "gate": symbol.replace("USDT", "_USDT")}.get(ex.name)
         if alt in vols:
             symbol = alt
-    df, r = analyse(ex, symbol, cfg)
+    df, r, trades = analyse(ex, symbol, cfg)
     print(f"\n{symbol} ({ex.name}, {cfg['interval']})  状态: {r.status}   完全符合VCP: {'是' if r.valid else '否'}")
     print(f"收缩: {r.depths_text() or '-'}   pivot: {fmt_price(r.pivot) if r.pivot else '-'}   底部 {r.base_bars} 根")
     for k, v in r.checks.items():

@@ -39,7 +39,9 @@ charts: all
 # ---------- 提醒（二选一或都填；不填就只在屏幕上显示） ----------
 telegram:
   bot_token: ""                   # 例： 7123456789:AAH...（见 README 第 3 步）
-  chat_id: ""                     # 例： 123456789
+  # 多个接收人用英文逗号隔开；每个账号都要先在 Telegram 里打开机器人点 Start
+  # GitHub Secrets 里的 TELEGRAM_CHAT_ID 也会一起收到
+  chat_id: "1134208027"
 discord:
   webhook_url: ""
 
@@ -80,3 +82,23 @@ vcp:
   pivot_proximity_pct: 0.06       # 现价在 pivot 下方 6% 内 → SETUP
   breakout_volume_ratio: 1.5      # 突破K线成交量 ≥ 50 均量 × 1.5 → BREAKOUT
   breakout_max_extension: 0.05    # 收盘已高出 pivot 5% 以上就不再提醒（防追高）
+
+# ---------- 交易计划（每个信号都会附上：进场/止损/止盈/盈亏比/仓位） ----------
+trade:
+  account_usdt: 1000              # 你的账户资金（USDT），用来算仓位
+  risk_per_trade_pct: 0.01        # 每笔最多亏账户的 1%（打到止损时）
+  max_leverage: 5                 # 仓位最多用到 5 倍杠杆
+  entry_buffer: 0.002             # 突破单挂在 pivot 上方 0.2%
+  stop_buffer: 0.005              # 止损放在最后一次收缩低点下方 0.5%
+  max_stop_pct: 0.08              # 止损距离超过 8% 会提示风险偏大（Minervini 7~8% 原则）
+  tp1_r: 2                        # 止盈1 = 进场 + 2R（R = 进场价 - 止损价）
+  tp1_close_pct: 0.5              # 到止盈1平掉 50%，剩余止损移到进场价（保本）
+  tp2_r: 3                        # 止盈2 = 进场 + 3R，全部平仓
+  max_hold_bars: 60               # 最多持有 60 根K线，没走完按收盘离场
+
+# ---------- 历史验证（用同一套规则回放过去的行情，找出真实成功的 VCP） ----------
+validation:
+  enabled: true
+  lookback_bars: 120              # 回看最近 120 根K线（日线约 4 个月）
+  show_cases: 3                   # 每次展示最近 3 个成功案例（同一个案例只发一次图）
+

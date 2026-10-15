@@ -14,7 +14,8 @@ UP, DOWN = "#26a69a", "#ef5350"
 SEG_COLORS = ["#ff9800", "#ab47bc", "#42a5f5", "#66bb6a", "#ec407a", "#8d6e63"]
 
 
-def plot_vcp(df: pd.DataFrame, r: VCPResult, path: str, title: str = "", ma=(50, 150, 200)) -> str:
+def plot_vcp(df: pd.DataFrame, r: VCPResult, path: str, title: str = "", ma=(50, 150, 200),
+             plan=None, entry_idx=None, exit_idx=None) -> str:
     df = df.reset_index(drop=True)
     start = max(0, (r.base_start_idx or len(df) - 120) - 60)
     d = df.iloc[start:].reset_index(drop=True)
@@ -58,8 +59,27 @@ def plot_vcp(df: pd.DataFrame, r: VCPResult, path: str, title: str = "", ma=(50,
     if r.pivot:
         x0 = (r.pivot_idx or 0) - off
         ax.hlines(r.pivot, x0, len(d) - 1 + 3, colors="#d32f2f", linestyles="--", linewidth=1.6)
-        ax.text(len(d) + 3, r.pivot, f" Pivot {r.pivot:.6g}", color="#d32f2f", va="bottom", fontsize=10,
-                fontweight="bold")
+        if plan is None:
+            ax.text(len(d) + 3, r.pivot, f" Pivot {r.pivot:.6g}", color="#d32f2f", va="bottom", fontsize=10,
+                    fontweight="bold")
+        else:  # 有交易计划时，pivot 标签放左边，避免和进场价重叠
+            ax.text(x0, r.pivot, f"Pivot {r.pivot:.6g} ", color="#d32f2f", va="bottom", ha="right", fontsize=9,
+                    fontweight="bold")
+
+    # 交易计划：进场 / 止损 / 止盈线
+    if plan is not None:
+        xs = (entry_idx - off) if entry_idx is not None else len(d) - 1
+        xe = len(d) - 1 + 8
+        for price, col, name in [(plan.entry, "#1565c0", "Entry"), (plan.stop, "#c62828", "Stop"),
+                                 (plan.tp1, "#2e7d32", "TP1"), (plan.tp2, "#1b5e20", "TP2")]:
+            ax.hlines(price, xs, xe, colors=col, linewidth=1.3, linestyles="-." if name != "Entry" else "-")
+            ax.text(xe, price, f" {name} {price:.6g}", color=col, va="center", fontsize=9, fontweight="bold")
+        ax.fill_between([xs, xe], plan.stop, plan.entry, color="#ffcdd2", alpha=0.35, linewidth=0)
+        ax.fill_between([xs, xe], plan.entry, plan.tp2, color="#c8e6c9", alpha=0.3, linewidth=0)
+        if entry_idx is not None:
+            ax.scatter([entry_idx - off], [plan.entry], marker="*", s=180, color="#1565c0", zorder=6)
+        if exit_idx is not None:
+            ax.axvline(exit_idx - off, color="#616161", linestyle=":", linewidth=1)
 
     st = {"BREAKOUT": "BREAKOUT", "SETUP": "SETUP (near pivot)"}.get(r.status, r.status)
     head = title or r.symbol
@@ -67,7 +87,7 @@ def plot_vcp(df: pd.DataFrame, r: VCPResult, path: str, title: str = "", ma=(50,
                  fontsize=11, loc="left")
     ax.legend(loc="upper left", fontsize=8)
     ax.grid(alpha=0.25)
-    ax.set_xlim(-1, len(d) + 12)
+    ax.set_xlim(-1, len(d) + (22 if plan is not None else 12))
 
     # 成交量
     axv.bar(x, d["volume"], color=colors, width=0.7, alpha=0.8)

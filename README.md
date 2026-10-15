@@ -107,10 +107,33 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 
 ---
 
+## 交易计划 & 历史验证
+
+每个 SETUP / BREAKOUT 提醒都会附上按规则计算的交易计划（`config.yaml` 的 `trade:` 段可调）：
+
+| 项目 | 规则 |
+|---|---|
+| 进场 | SETUP：pivot 上方 0.2% 挂突破单；BREAKOUT：突破K线收盘价 |
+| 止损 | 最后一次收缩的低点下方 0.5%（形态失败位置）；距离 > 8% 会提示风险偏大 |
+| 止盈1 | 进场 + 2R，平 50%，剩余止损移到进场价（保本） |
+| 止盈2 | 进场 + 3R，全部平仓（盈亏比 1:3） |
+| 时间止损 | 持有满 60 根K线未结束，按收盘离场 |
+| 仓位 | 名义仓位 = 账户 × 每笔风险% ÷ 止损距离%（默认账户 1000U、风险 1%、最多 5 倍杠杆） |
+
+**历史验证**：每次扫描都会用同一套规则，回放每个币最近 120 根K线“当时看得到的数据”，
+找出当时真实触发的 VCP 突破并模拟交易。汇总里给出突破次数、到达止盈1的比例、平均 R，
+并单独推送 **最近 3 个成功案例**（带图：进场★、止损、止盈线、离场位置），同一个案例只推一次。
+注意：统计不含手续费、资金费率和滑点；历史成功不代表未来。
+
+## 多个账号接收通知
+`config.yaml` 里 `telegram.chat_id` 可以填多个，用英文逗号分隔，例如 `"123456789,1134208027"`。
+GitHub Secrets 里的 `TELEGRAM_CHAT_ID` 也会一起收到。每个账号都要先在 Telegram 里打开机器人点 **Start**。
+
 ## 输出文件
 - `output/<时间>/signals.csv`：本轮 SETUP / BREAKOUT 信号
 - `output/<时间>/all_results.csv`：所有币的判定明细和不符合原因
-- `output/<时间>/*.png`：符合形态的币的图
+- `output/<时间>/*.png`：符合形态的币的图（含交易计划线）
+- `output/<时间>/validation_trades.csv`：历史验证的每一笔模拟交易
 
 ## 文件说明
 | 文件 | 作用 |
@@ -119,6 +142,7 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 | `vcp/detector.py` | VCP 判定算法 |
 | `vcp/data.py` | 各交易所免费行情接口 |
 | `vcp/chart.py` | 画图 |
+| `vcp/trade.py` | 交易计划 + 历史验证 |
 | `vcp/notify.py` | Telegram / Discord 提醒 |
 | `config.yaml` | 所有设置 |
 | `tests/` | 自动测试（`python -m pytest`） |
