@@ -105,6 +105,8 @@ strategy:
   #    只做高分：低于 min_score 或 min_rating 的不提醒、不进场（纪律）
   min_score: 1
   min_rating: GOOD
+  # 执行周期（4h/1h/30m）的均线必须多头排列：MA50 > MA150 > MA200，否则不提醒（师父）
+  require_ma_stack: true
 
 # ---------- 账户（用来算仓位） ----------
 account:

@@ -74,6 +74,7 @@ DEFAULTS = {
     # 评级（Score = S、C、V 三项各 +1/-1 的合计，满分 3）
     "min_rating": "GOOD",           # 低于这个评级不提醒：WEAK < FAIR < GOOD < STRONG < EXCELLENT
     "min_score": 1,                 # Score 低于这个分数不提醒
+    "require_ma_stack": True,       # 执行周期必须 MA50 > MA150 > MA200（多头排列），否则不提醒
     # 仓位
     "account_usdt": 1000,
     "risk_per_trade_pct": 0.01,
@@ -175,6 +176,7 @@ class Signal:
     rs: Optional[int] = None                 # 相对强度百分位（扫描完所有币后才算得出）
     rs_raw: float = 0.0
     tf: str = "4h"
+    ma_stack: dict = field(default_factory=dict)
 
     def to_row(self) -> dict:
         b = self.base
@@ -385,6 +387,9 @@ def _core(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, cfg: dict) -> Signal:
     sig = Signal(symbol=symbol, tf=cfg.get("exec_tf", "4h"))
     sig.last_close = float(df["close"].iloc[-1])
     sig.stage = stage_info(d1, cfg)
+    sig.ma_stack = ma_stack(df, cfg)
+    if cfg["require_ma_stack"] and not sig.ma_stack["ok"]:
+        sig.reasons.append(f"{sig.tf} 均线没有多头排列（{sig.ma_stack['text']}）")
     if not sig.stage["s2"]:
         sig.reasons.append(f"日线阶段 {sig.stage['label']}，不是 Stage 2（{sig.stage.get('why', '')}）")
     sig.bases = segment_bases(df, cfg, sig.stage)
@@ -420,8 +425,22 @@ def _core(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, cfg: dict) -> Signal:
         sig.reasons.append(f"当前 Base {cur.label()}：收缩不合格 {depths(cur)}")
     if sig.last_close < last_c.trough:
         sig.reasons.append("已跌破末段收缩低点")
-    sig.valid = sig.stage["s2"] and cur.ok and sig.last_close >= last_c.trough
+    sig.valid = (sig.stage["s2"] and cur.ok and sig.last_close >= last_c.trough
+                 and (sig.ma_stack["ok"] or not cfg["require_ma_stack"]))
     return sig
+
+
+def ma_stack(df: pd.DataFrame, cfg: dict) -> dict:
+    """执行周期的均线多头排列：MA50 > MA150 > MA200（师父：小周期的 VCP 必须在多头排列里）。
+    价格不一定要在均线上方（师父 BTW/UAI/NMR 的例子价格都在 MA50 下），但三条均线的顺序必须是多头。"""
+    c = df["close"]
+    ks = [k for k in (50, 150, 200) if len(df) >= k]
+    vals = {k: float(c.rolling(k).mean().iloc[-1]) for k in ks}
+    if len(ks) < 2:
+        return {"ok": True, "text": "K线太少，未检查", "vals": vals}
+    ok = all(vals[a] > vals[b] for a, b in zip(ks, ks[1:]))
+    text = " > ".join(f"MA{k}" for k in ks) if ok else " / ".join(f"MA{k} {vals[k]:.6g}" for k in ks)
+    return {"ok": ok, "text": text, "vals": vals}
 
 
 def depths(b: Base) -> str:
@@ -489,6 +508,7 @@ def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
     """
     SCV（从师父 9 个报告反推，每个例子都对得上）：
       S 结构：Stage2 +1.0（不在 Stage2 -2.0）；执行周期收盘 > MA50 > MA150 > MA200（Close确认排列）+0.5
+              （均线本身必须多头排列，否则直接不提醒，见 ma_stack）
       C 收缩：C1 在 20%~35% 记 0，C1偏小（<20%）-0.5；Base确认 +1.0 / 未确认 +0.5；
               第1Base +0.5、第2Base +1.5、第3Base 0；Pivot突破 +1.0；长上影线 -1.0
       V 成交量：近期阳放 +1.0；阴足放量 -2.0；都没有 = 0（“无量”就拿不到这 1 分）；日成交额 < 100 万 -2.0

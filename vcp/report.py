@@ -41,6 +41,8 @@ def signal_text(sig, cfg: dict, ex_name: str, head: str | None = None, new: bool
         f"RS 相对强度: {sig.rs if sig.rs is not None else '-'} (< {cfg['min_rs']} 扣分，在本次扫描的币中排名百分位)",
         f"Advance 前期涨幅: {st.get('adv', 0) * 100:+.0f}% (${fp(st.get('adv_low'))} → ${fp(st.get('adv_high'))})"
         f"{' 翻倍 ✅' if st.get('adv', 0) >= cfg['advance_bonus_pct'] else ''}",
+        f"Exec MA 执行周期均线: {'✅ 多头排列 ' if sig.ma_stack.get('ok') else '❌ 没有多头排列 '}"
+        f"({sig.ma_stack.get('text', '-')})",
         f"Pattern 收缩: {'-'.join(f'C{i + 1}' for i in range(len(b.cons))) if b else '-'}",
         f"Base Rank 基地编号: B{b.no} ({b.status})" if b else "Base Rank 基地编号: -",
         (f"Last C 末段收缩: {b.cons[-1].depth * 100:.1f}%"
