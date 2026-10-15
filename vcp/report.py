@@ -3,44 +3,49 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .engine import PROFILES
+from .engine import BARS_PER_DAY, PROFILES
 from .chart import display_symbol, fmoney, fp  # noqa: F401  (display_symbol 供 scanner 使用)
 
 STATUS_HEAD = {
-    "BREAKOUT": "🚀 SIGNAL UPDATE / 信号更新 · 突破",
-    "SETUP": "👀 SIGNAL UPDATE / 信号更新 · 接近入场",
+    "BREAKOUT": "🚀 {kind} · 突破",
+    "SETUP": "👀 {kind} · 接近入场",
     "NONE": "SIGNAL CHECK / 信号检查",
 }
 
 
-def signal_text(sig, cfg: dict, ex_name: str, head: str | None = None) -> str:
+def signal_text(sig, cfg: dict, ex_name: str, head: str | None = None, new: bool = True) -> str:
     b = sig.base
     st = sig.stage
     hist = " -> ".join(x.label() for x in sig.bases) or "-"
-    cdet = " | ".join(" ".join(f"B{x.no}C{i + 1}:{c.depth * 100:.1f}%" for i, c in enumerate(x.cons))
-                      for x in sig.bases if x.cons) or "-"
+    # 和师父一样：已结束的 Base 写 B1C1，当前还没确认的 Base 直接写 C1、C2
+    cdet = " | ".join(" ".join(f"{'' if (x.current and not x.confirmed) else f'B{x.no}'}C{i + 1}:{c.depth * 100:.1f}%"
+                               for i, c in enumerate(x.cons)) for x in sig.bases if x.cons) or "-"
+    kind = "NEW SIGNAL / 新信号" if new else "SIGNAL UPDATE / 信号更新"
     v = sig.vol or {}
     sz = sig.size or {}
     prof = PROFILES[cfg["exit_profile"]]
     tp_note = "" if prof["tp_r"] else f"，卖 {prof['partial_pct'] * 100:.0f}%"
     lines = [
-        head or STATUS_HEAD.get(sig.status, STATUS_HEAD["NONE"]),
+        head or STATUS_HEAD.get(sig.status, STATUS_HEAD["NONE"]).format(kind=kind),
         "",
         f"{display_symbol(sig.symbol)}  ({ex_name})",
         f"Exec TF 执行周期: {cfg['exec_tf']}",
         f"Stage TF 阶段周期: {cfg['stage_tf']}",
         "Direction 方向: LONG",
         f"Rating 评级: {sig.rating}",
-        f"Score 分数: {sig.score} / 3  (S{_sign_txt(sig.s[0])} C{_sign_txt(sig.c[0])} V{_sign_txt(sig.v[0])}；"
-        f"满分 3，每项被扣成负数记 -1；需 ≥ {cfg['min_rating']})",
+        f"Score 分数: {sig.score}  (S{_sign_txt(sig.s[0])} C{_sign_txt(sig.c[0])} V{_sign_txt(sig.v[0])}；"
+        f"满分 3；需 ≥ {cfg['min_score']})",
         "",
         f"Stage 阶段: {st.get('label', '-')} ({st.get('bars', 0)} D1 bars)",
         "Trend Template 趋势模板: " + (" ".join(f"{'✅' if v else '❌'}{k}" for k, v in st.get("checks", {}).items()) or "-"),
-        f"RS 相对强度: {sig.rs if sig.rs is not None else '-'} (需 ≥ {cfg['min_rs']}，在本次扫描的币中排名百分位)",
+        f"RS 相对强度: {sig.rs if sig.rs is not None else '-'} (< {cfg['min_rs']} 扣分，在本次扫描的币中排名百分位)",
         f"Advance 前期涨幅: {st.get('adv', 0) * 100:+.0f}% (${fp(st.get('adv_low'))} → ${fp(st.get('adv_high'))})"
         f"{' 翻倍 ✅' if st.get('adv', 0) >= cfg['advance_bonus_pct'] else ''}",
         f"Pattern 收缩: {'-'.join(f'C{i + 1}' for i in range(len(b.cons))) if b else '-'}",
         f"Base Rank 基地编号: B{b.no} ({b.status})" if b else "Base Rank 基地编号: -",
+        (f"Last C 末段收缩: {b.cons[-1].depth * 100:.1f}%"
+         f"{'（> ' + format(cfg['half_size_last_c'] * 100, '.0f') + '% 风险大，仓位减半）' if b.cons[-1].depth > cfg['half_size_last_c'] else ''}")
+        if b and b.cons else "Last C 末段收缩: -",
         f"Base History 基地历史: {hist}",
         f"Base C 明细: {cdet}",
         f"Base 基地: ${fp(b.high)} - ${fp(b.low)} ({b.status})" if b else "Base 基地: -",
@@ -98,16 +103,17 @@ def signal_text(sig, cfg: dict, ex_name: str, head: str | None = None) -> str:
 def exit_logic(prof: dict, cfg: dict) -> str:
     tf = cfg["exec_tf"]
     parts = ["跌破 Stop 全部离场"]
-    if prof["partial_after_bars"]:
-        parts.append(f"持有 {prof['partial_after_bars']} 根 {tf} 后若盈利，先卖 {prof['partial_pct'] * 100:.0f}% 并把止损移到入场价")
+    if prof["partial_after_days"]:
+        parts.append(f"持有 {prof['partial_after_days']} 天后若盈利，先卖 {prof['partial_pct'] * 100:.0f}% 并把止损移到入场价")
     if prof["be_r"]:
         parts.append(f"涨到 +{prof['be_r']:g}R 把止损移到入场价（保本）")
     if prof["partial_r"]:
         parts.append(f"涨到 +{prof['partial_r']:g}R 卖 {prof['partial_pct'] * 100:.0f}%（逢强卖出）")
     if prof["tp_r"]:
         parts.append(f"涨到 +{prof['tp_r']:g}R 全部止盈")
-    if prof["trail_ma"]:
-        parts.append(f"剩余仓位 {tf} 收盘跌破 MA{prof['trail_ma']} 离场")
+    if prof["trail_days"]:
+        n = prof["trail_days"] * BARS_PER_DAY.get(tf, 6)
+        parts.append(f"剩余仓位 {tf} 收盘跌破 MA{n}（≈ {prof['trail_days']} 日均线）离场")
     parts.append(f"持仓满 {cfg['max_hold_bars']} 根 {tf} 未结束按收盘离场；Chart TP 是上方前高阻力，可考虑减仓")
     return "；".join(parts)
 

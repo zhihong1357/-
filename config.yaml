@@ -40,12 +40,16 @@ telegram:
 discord:
   webhook_url: ""
 
-# ---------- 策略（日线判断阶段 + 4h 找收缩和进场，全部客观量化） ----------
+# ---------- 策略（日线判断阶段 + 多个执行周期找收缩和进场，全部客观量化） ----------
 strategy:
-  exec_tf: 4h                     # 执行周期：找 Base / 收缩 / 进场
+  exec_tfs: [4h, 1h, 30m]         # 执行周期：每个周期各自找 Base / 收缩 / 进场并各自打分（可加 15m）
+  exec_tf: 4h                     # 只用一个周期时的默认值
   stage_tf: 1d                    # 阶段周期：判断是否 Stage 2
-  exec_bars: 900                  # 4h 拉 900 根（约 150 天，要覆盖整段大涨才能正确数 Base）
   stage_bars: 400                 # 日线拉 400 根
+  # 各周期默认：4h 拉 900 根、挂单缓冲 0.5%；1h 拉 600 根、0.5%；30m / 15m 拉 600 根、0.25%（师父的设置）
+  # 想改某个周期就在这里覆盖，例如：
+  # tf_overrides:
+  #   30m: {entry_buffer: 0.003}
 
   # 1) 阶段（日线）：Minervini 趋势模板 8 条
   #    价格>MA150且>MA200；MA150>MA200；MA200 向上至少 1 个月；MA50>MA150且>MA200；价格>MA50；
@@ -54,13 +58,12 @@ strategy:
   ma_slow_rising_bars: 20         # MA200 向上：比 20 根（约 1 个月）前高；Minervini 更偏好 4~5 个月
   min_above_low_pct: 0.30
   max_below_high_pct: 0.25
-  min_rs: 70                      # RS = 在本次扫描的所有币里的强弱排名（1~99）
-  strong_rs: 85                   # RS ≥ 85 加分
+  min_rs: 70                      # RS = 在本次扫描的所有币里的强弱排名（1~99），< 70 → S 扣 1 分
   advance_lookback: 365           # 找起涨低点的范围（也是数 Base 的起点）
-  advance_bonus_pct: 1.0          # 前期涨幅 ≥ 100%（翻倍）→ S 加分
+  advance_bonus_pct: 1.0          # 报告里显示前期是否翻倍
   require_advance: false          # true = 前期翻倍变成硬性条件（比 Minervini 更严格）
 
-  # 2) Base 与收缩（4h）
+  # 2) Base 与收缩（执行周期）
   #    C1 = Base 最高点 → 回调最低点；之后每段收缩的低点必须比上一段高（没抬高就并入上一段）
   base_min_depth: 0.08            # 从高点回撤 ≥ 8% 才算开始一个新 Base（B1、B2…）
   base_min_bars: 10               # Base 至少 10 根 4h K线
@@ -68,41 +71,39 @@ strategy:
   recovery_ratio: 0.35            # 反弹收回上段跌幅 ≥ 35% 才算新一段收缩
   min_contractions: 2
   max_contractions: 6
-  max_bases: 2                    # 超过 2 个 Base 判定失效（LATE）
+  max_bases: 3                    # B4 起判定失效（师父：B3 还能做，只是得分低）
   max_first_depth: 0.35           # C1 ≤ 35%（Minervini 原版）
-  max_last_depth: 0.10            # 最后一段 ≤ 10%（Minervini：末段通常是个位数的紧密收缩）
+  half_size_last_c: 0.10          # 最后一段 > 10% → 风险大，仓位减半（师父）
+  confirm_bars: 5                 # 末段低点守住 5 根K线、且反弹过末段一半 → Base 确认（CONFIRMED）
   contraction_tolerance: 0.10     # 后一段可比前一段大 10%（相对）以内
-  small_c1_pct: 0.20              # C1 ≤ 20% → “C1偏小”加分
+  small_c1_pct: 0.20              # C1 < 20% → “C1偏小”（洗盘不够深）C 扣 0.5
 
   # 3) 进场 / 止损 / 止盈
-  entry_buffer: 0.005             # 挂单缓冲：Entry = Pivot × 1.005
   stop_buffer: 0.005              # Stop = 末段收缩低点 × 0.995
   # 出场方案（R = 入场价 - 止损价），历史回放会三种都算一遍做对比：
-  #   minervini   ：+2R 止损移到保本；+3R 卖一半；剩下 4h 收盘跌破 MA120（≈日线 20MA）离场
+  #   minervini   ：+2R 止损移到保本；+3R 卖一半；剩下收盘跌破“20 日均线”离场
   #   master      ：师父报告的参数，+0.8R 保本，+5R 全部止盈
-  #   qullamaggie ：持有 18 根 4h（3 天）后若盈利卖一半并保本；剩下跌破 MA60（≈日线 10MA）离场
+  #   qullamaggie ：持有 3 天后若盈利卖一半并保本；剩下跌破“10 日均线”离场
   exit_profile: minervini
-  chart_tp_lookback: 180          # 结构止盈 Chart TP = 最近 180 根 4h 的最高点
   near_entry_pct: 0.03            # 现价在 Entry 下方 3% 内 → SETUP（接近入场）
   max_extension_pct: 0.03         # 已高出 Entry 3% 以上不再提醒（防追高）
-  breakout_lag_bars: 3            # 最近 3 根 4h 内收盘突破都算 BREAKOUT
-  max_hold_bars: 180              # 历史回放最多持有 180 根 4h（30 天）
+  breakout_lag_bars: 3            # 最近 3 根K线内收盘突破都算 BREAKOUT
 
   # 4) 成交量
   volume_ma: 50
-  vol_expansion: 1.2              # 成交额 ≥ 均线 1.2 倍 = 放量
-  vol_quiet: 0.8                  # < 0.8 倍 = 缩量
-  liquidity_cap_pct: 0.10         # 单笔上限 = 最新 4h 成交额的 10%
+  vol_spike: 1.3                  # 成交额 ≥ MA50 × 1.3 = 放量K线
+  recent_vol_bars: 10             # “近期”= 最近 10 根K线（近期阳放 +1、阴足放量 -2）
+  liquidity_cap_pct: 0.10         # 单笔上限 = 最新一根K线成交额的 10%
 
-  # 5) 扣分制（师父的做法：走满分，慢慢扣分）
-  #    S 结构 / C 收缩 / V 成交量 三项各自加减分，最后每项正数记 +1、负数记 -1，合计 = Score（满分 3）
-  #    师父的四条扣分：不在 Stage 2、无量（突破K线成交额没超过 MA50）、长上影线、日成交额不到 100 万
+  # 5) SCV 扣分制（从师父 9 个报告反推，见 README）
+  #    S / C / V 各自加减分，每项正数 +1、0 记 0、负数 -1，合计 = Score（满分 3）
   min_daily_volume: 1000000       # 最近 24h 成交额 < 100 万 USDT → 流动性差，V 扣 2 分
-  wick_lookback: 3                # 检查最近 3 根 4h 有没有长上影线
-  wick_ratio: 0.5                 # 上影线 ≥ 整根K线的 50% = 长上影线，C 扣 2 分
+  wick_lookback: 3                # 检查最近 3 根K线有没有长上影线
+  wick_ratio: 0.5                 # 上影线 ≥ 整根K线的 50% = 长上影线，C 扣 1 分
 
-  # 6) 评级：Score 3 = EXCELLENT，2 = STRONG，1 = GOOD，0 = FAIR，负分 = WEAK
-  #    只做高分：低于 min_rating 不提醒、不进场（纪律）
+  # 6) 评级：3 分 STRONG，1~2 分 GOOD，0 分 FAIR，负分 WEAK
+  #    只做高分：低于 min_score 或 min_rating 的不提醒、不进场（纪律）
+  min_score: 1
   min_rating: GOOD
 
 # ---------- 账户（用来算仓位） ----------
@@ -110,10 +111,10 @@ account:
   account_usdt: 1000              # 你的账户资金（USDT）
   risk_per_trade_pct: 0.01        # 每笔打到止损最多亏账户 1%
   max_leverage: 5                 # 仓位最多 5 倍杠杆
-  max_risk_pct: 0.10              # 入场风险 > 10% → 不做（Minervini：单笔止损不超过 10%）
+  max_risk_pct: 0.10              # 入场风险 > 10% → 半仓（HALF_SIZE）
 
 # ---------- 历史回放（用同一套规则重演过去行情，验证信号是否真的有效） ----------
 validation:
   enabled: true
-  lookback_bars: 300              # 回放最近 300 根 4h（约 50 天）
+  lookback_bars: 300              # 每个周期回放最近 300 根K线（4h 约 50 天、1h 约 12 天、30m 约 6 天）
   show_cases: 3                   # 每次发最近 3 个历史案例（优先成功的；同一笔只发一次，结果变化时再发）
