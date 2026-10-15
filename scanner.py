@@ -249,44 +249,67 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     return table
 
 
+ICON = {"止盈2 全部达成": "✅", "止盈1后保本离场": "✅", "持仓中": "⏳", "止损": "❌", "到期按收盘离场": "⌛"}
+
+
+def _fmt_date(x) -> str:
+    return pd.Timestamp(x).strftime("%Y-%m-%d")
+
+
 def validation_stats(trades: list, cfg: dict) -> list[str]:
     closed = [t for t in trades if not t["open"]]
     n_open = len(trades) - len(closed)
     look = cfg["validation"]["lookback_bars"]
     if not trades:
-        return [f"🧪 历史验证(最近 {look} 根K线): 没有出现过 VCP 突破"]
+        return [f"🧪 历史验证(最近 {look} 根K线): 这段时间没有出现过 VCP 突破"]
     wins = [t for t in closed if t["tp1_hit"]]
-    avg_r = sum(t["r"] for t in closed) / len(closed) if closed else 0
-    return [f"🧪 历史验证(最近 {look} 根K线，同一套规则回放):",
-            f"出现突破 {len(trades)} 次，已结束 {len(closed)} 次，持仓中 {n_open} 次",
-            f"到达止盈1(2R)比例: {len(wins)}/{len(closed)}"
-            + (f" = {len(wins)/len(closed)*100:.0f}%" if closed else ""),
-            f"平均每笔: {avg_r:+.2f}R（不含手续费/滑点）"]
+    out = [f"🧪 历史验证(最近 {look} 根K线，同一套规则回放):",
+           f"出现突破 {len(trades)} 次：已结束 {len(closed)} 次，持仓中 {n_open} 次"]
+    if closed:
+        avg_r = sum(t["r"] for t in closed) / len(closed)
+        out.append(f"已结束的交易到达止盈1(2R): {len(wins)}/{len(closed)} = {len(wins)/len(closed)*100:.0f}%")
+        out.append(f"已结束交易平均每笔: {avg_r:+.2f}R（不含手续费/滑点）")
+    else:
+        out.append("还没有已结束的交易，暂时无法计算成功率")
+    for t in sorted(trades, key=lambda t: t["time"], reverse=True)[:10]:
+        out.append(f"{ICON.get(t['outcome'], '•')} {t['symbol']} {_fmt_date(t['time'])} {t['outcome']} {t['r']:+.2f}R")
+    out.append("（每笔的图和完整交易计划会单独发送，同一笔只发一次，结果变化时再发）")
+    return out
 
 
 def send_cases(trades, frames, cfg, ex_name, run_dir, notifier, state):
+    """先发最近的成功案例，不足 show_cases 个时用最近的其他历史突破（持仓中/止损）补足。"""
     k = cfg["validation"]["show_cases"]
-    wins = [t for t in trades if t["tp1_hit"]]
-    wins.sort(key=lambda t: t["time"], reverse=True)
-    cases = wins[:k]
+    recent = sorted(trades, key=lambda t: t["time"], reverse=True)
+    wins = [t for t in recent if t["tp1_hit"]]
+    cases = wins[:k] + [t for t in recent if not t["tp1_hit"]][: max(0, k - len(wins))]
     if not cases:
-        print("历史验证：最近没有成功案例")
+        print("历史验证：这段时间没有出现过 VCP 突破")
         return
-    print(f"最近 {len(cases)} 个经验证成功的 VCP 案例:")
-    for n, t in enumerate(cases, 1):
+    print(f"历史 VCP 突破案例 {len(cases)} 个:")
+    for t in cases:
         p, r = t["plan"], t["result"]
         df = frames[t["symbol"]]
-        d0 = pd.Timestamp(t["time"]).strftime("%Y-%m-%d")
-        d1 = pd.Timestamp(df["time"].iloc[t["exit_idx"]]).strftime("%Y-%m-%d")
-        print(f"  {t['symbol']} {d0} 结果 {t['outcome']} {t['r']:+.2f}R 最大涨幅 {t['max_gain_pct']}%")
+        d0, d1 = _fmt_date(t["time"]), _fmt_date(df["time"].iloc[t["exit_idx"]])
+        bars = t["exit_idx"] - t["idx"]
+        print(f"  {t['symbol']} {d0} {t['outcome']} {t['r']:+.2f}R 最大涨幅 {t['max_gain_pct']}%")
         key = f"case|{ex_name}|{t['symbol']}|{d0}|{t['outcome']}"
         if key in state or not notifier.enabled:
             continue
+        if t["open"]:
+            head = "⏳ 历史 VCP 突破 · 仍在持仓中（按规则未触发离场）"
+            res = [f"现价: {fmt_price(df['close'].iloc[-1])}   浮动结果: {t['r']:+.2f}R   已持有 {bars} 根K线",
+                   f"期间最大涨幅: {t['max_gain_pct']}%   止盈1 {'已到达，止损已移到进场价' if t['tp1_hit'] else '未到达'}"]
+        else:
+            head = {True: "✅ 已验证成功的 VCP 案例", False: "❌ 历史 VCP 突破 · 失败案例"}[t["tp1_hit"]]
+            res = [f"结果: {t['outcome']}  {t['r']:+.2f}R   离场日 {d1}（持有 {bars} 根K线）",
+                   f"期间最大涨幅: {t['max_gain_pct']}%"]
         text = "\n".join([
-            f"✅ 已验证成功的 VCP 案例 #{n}",
+            head,
             f"{t['symbol']}  ({ex_name} 永续 · {cfg['interval']})",
-            f"突破日: {d0}   收缩: {t['depths']}   pivot: {fmt_price(t['pivot'])}",
-            f"结果: {t['outcome']}  {t['r']:+.2f}R   最大涨幅 {t['max_gain_pct']}%   结束日 {d1}",
+            f"突破日: {d0}   收缩: {t['depths']}",
+            f"Pivot: {fmt_price(t['pivot'])}",
+            *res,
             "",
             *plan_lines(p, cfg, "BREAKOUT"),
             "⚠️ 历史案例用于理解规则，不代表未来结果",
@@ -296,7 +319,7 @@ def send_cases(trades, frames, cfg, ex_name, run_dir, notifier, state):
             img = str(run_dir / f"CASE_{t['symbol']}_{d0}.png")
             end = min(len(df), t["exit_idx"] + 15)
             plot_vcp(df.iloc[:end], r, img, title=f"CASE {t['symbol']} {d0} ({ex_name}, {cfg['interval']})",
-                     plan=p, entry_idx=t["idx"], exit_idx=t["exit_idx"])
+                     plan=p, entry_idx=t["idx"], exit_idx=None if t["open"] else t["exit_idx"])
         notifier.send(text, img)
         state[key] = time.time()
 
