@@ -25,7 +25,7 @@ import yaml
 
 from vcp.chart import plot_signal
 from vcp.data import ExchangeError, drop_unclosed, get_exchange
-from vcp.engine import DEFAULTS, analyze, replay
+from vcp.engine import DEFAULTS, PROFILES, analyze, apply_rs, replay, rs_percentiles
 from vcp.notify import Notifier, find_chat_id
 from vcp.report import case_text, display_symbol, signal_text
 
@@ -134,6 +134,12 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
         print("没有拿到任何数据")
         return pd.DataFrame()
 
+    # RS 相对强度：在本次扫描的所有币里排名（Minervini 趋势模板第 8 条）
+    pct = rs_percentiles({r.symbol: r.rs_raw for r in results})
+    for r in results:
+        if r.symbol in pct:
+            apply_rs(r, pct[r.symbol], sc)
+
     table = pd.DataFrame([r.to_row() for r in results]).sort_values(["valid", "score"], ascending=False)
     table.to_csv(run_dir / "all_results.csv", index=False, encoding="utf-8-sig")
 
@@ -199,8 +205,10 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     return table
 
 
-ICON = {"计划止盈达成": "✅", "保本离场": "➖", "持仓中": "⏳", "止损": "❌", "到期离场": "⌛"}
-EN = {"计划止盈达成": "TP HIT", "保本离场": "BE EXIT", "持仓中": "OPEN", "止损": "STOPPED", "到期离场": "TIME EXIT"}
+ICON = {"计划止盈达成": "✅", "部分止盈后离场": "✅", "跟踪止盈离场": "✅", "保本离场": "➖", "持仓中": "⏳",
+        "止损": "❌", "到期离场": "⌛"}
+EN = {"计划止盈达成": "TP HIT", "部分止盈后离场": "PARTIAL+EXIT", "跟踪止盈离场": "TRAIL EXIT", "保本离场": "BE EXIT",
+      "持仓中": "OPEN", "止损": "STOPPED", "到期离场": "TIME EXIT"}
 
 
 def validation_stats(trades: list, cfg: dict) -> list[str]:
@@ -213,14 +221,24 @@ def validation_stats(trades: list, cfg: dict) -> list[str]:
            f"触发入场 {len(trades)} 次：已结束 {len(closed)} 次，持仓中 {len(trades) - len(closed)} 次"]
     if closed:
         wins = [t for t in closed if t["success"]]
-        tp = [t for t in closed if t["outcome"] == "计划止盈达成"]
-        be = [t for t in closed if t["outcome"] == "保本离场"]
         sl = [t for t in closed if t["outcome"] == "止损"]
+        be = [t for t in closed if t["outcome"] == "保本离场"]
         avg = sum(t["r"] for t in closed) / len(closed)
-        out += [f"止盈 {len(tp)} | 保本 {len(be)} | 止损 {len(sl)} | 盈利≥1R {len(wins)}/{len(closed)}",
+        out += [f"止损 {len(sl)} | 保本 {len(be)} | 盈利≥1R {len(wins)}/{len(closed)}（按 {PROFILES[sc['exit_profile']]['name']} 出场）",
                 f"已结束交易平均每笔: {avg:+.2f}R（不含手续费/资金费/滑点）"]
     else:
         out.append("还没有已结束的交易，暂时无法计算成功率")
+    # 同一批入场，三种出场方案的对比（只算已结束的）
+    out.append("出场方案对比（同一批入场）:")
+    for name, prof in PROFILES.items():
+        res = [t["by_profile"][name] for t in trades if not t["by_profile"][name]["open"]]
+        mark = "👉" if name == sc["exit_profile"] else "  "
+        if not res:
+            out.append(f"{mark}{prof['name']}: 暂无已结束交易")
+            continue
+        avg = sum(x["r"] for x in res) / len(res)
+        win = sum(x["r"] > 0 for x in res)
+        out.append(f"{mark}{prof['name']}: {len(res)} 笔，盈利 {win} 笔，平均 {avg:+.2f}R，合计 {sum(x['r'] for x in res):+.1f}R")
     for t in sorted(trades, key=lambda t: t["time"], reverse=True)[:10]:
         out.append(f"{ICON.get(t['outcome'], '•')} {display_symbol(t['symbol'])} "
                    f"{pd.Timestamp(t['time']):%m-%d %H:%M} {t['outcome']} {t['r']:+.2f}R")
@@ -267,6 +285,7 @@ def single(cfg: dict, symbol: str):
     df, sig, trades = analyse(ex, symbol, cfg)
     sc = cfg["strategy"]
     print(signal_text(sig, sc, ex.name))
+    print("（单币模式没有其他币可比，RS 相对强度不计算；完整扫描时才会排名）")
     if sig.reasons:
         print("\n未触发信号的原因: " + "; ".join(sig.reasons))
     print("\n" + "\n".join(validation_stats(trades, cfg)))
