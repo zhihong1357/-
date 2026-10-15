@@ -59,7 +59,7 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 
 ## 不想开着电脑？用 GitHub 免费云端自动跑（可选）
 
-本仓库已包含 `.github/workflows/vcp-scan.yml`，每 2 小时自动扫描一次（GitHub 定时任务常会延迟或跳过，所以排得比较密；汇总消息最多 4 小时发一次）。
+本仓库已包含 `.github/workflows/vcp-scan.yml`，每 4 小时自动扫描一次（3 个执行周期每次约 7 分钟；私有仓库每月免费 2000 分钟，这样约用 1300 分钟）。
 1. 仓库页面 → **Settings → Secrets and variables → Actions → New repository secret**
 2. 添加 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 两个 secret（值同第 3 步；chat_id 可用 @userinfobot 查到）。**不要把 token 直接写进仓库里的 `config.yaml`**，别人看到就能用你的机器人
 3. 打开 **Actions** 页面 → 选 **VCP Scan** → **Run workflow** 手动试一次，Telegram 会收到一条「📊 VCP 扫描完成」汇总
@@ -67,7 +67,7 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 
 注意：GitHub 的服务器在美国，Binance / Bybit 会拒绝美国 IP，程序会自动改用 OKX 或 Gate 的数据。
 同一个币在各交易所的走势几乎一样，形态判断结果基本一致；你仍可在自己常用的交易所下单。
-（私有仓库每月有 2000 分钟免费额度，按默认频率大约用 500 分钟左右。）
+（如果把仓库设成公开就没有分钟数限制，可以改回更密的频率；token 放在 Secrets 里不会公开。）
 
 ---
 
