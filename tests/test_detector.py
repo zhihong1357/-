@@ -226,3 +226,21 @@ def test_one_failing_timeframe_keeps_the_others(monkeypatch):
     cfg = scanner.load_config("config.yaml")
     out = scanner.analyse(Ex(), "X", cfg)
     assert [tf for tf, *_ in out] == ["4h", "1h"]
+
+
+def test_exec_ma_stack_required():
+    # PLTRUSDT 30m：日线是 Stage 2，但 30m 的 MA50 < MA150 < MA200 → 不能出信号（师父：均线没有多头排列）
+    import pandas as pd
+    from vcp.engine import ma_stack
+    df, d1 = make_two_base_4h()
+    assert ma_stack(df, DEFAULTS)["ok"]
+    bear = df.copy()
+    for k in ("open", "high", "low", "close"):
+        bear[k] = df[k].to_numpy()[::-1]                         # 价格倒过来 = 一路下跌，均线空头排列
+    bear["high"], bear["low"] = bear[["high", "low"]].max(axis=1), bear[["high", "low"]].min(axis=1)
+    assert not ma_stack(bear, DEFAULTS)["ok"]
+    s = analyze("X", bear, d1)
+    assert s.status == "NONE" and not s.valid
+    assert any("均线没有多头排列" in r for r in s.reasons)
+    s = analyze("X", df, d1)
+    assert s.ma_stack["ok"] and s.status == "SETUP"
