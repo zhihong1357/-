@@ -1,51 +1,59 @@
-from tests.synthetic import make_downtrend, make_vcp
-from vcp.detector import detect_vcp, zigzag
+import numpy as np
 
-
-def test_vcp_setup_detected():
-    r = detect_vcp(make_vcp(), "X")
-    assert r.valid, r.reasons
-    assert r.status == "SETUP"
-    d = [c.depth for c in r.contractions]
-    assert len(d) >= 3
-    assert d[0] > d[-1]
-    assert 0.25 < d[0] < 0.35
-
-
-def test_vcp_breakout_detected():
-    r = detect_vcp(make_vcp(breakout=True), "X")
-    assert r.status == "BREAKOUT", r.reasons
-    assert r.breakout_volume_ratio >= 1.5
-
-
-def test_downtrend_rejected():
-    r = detect_vcp(make_downtrend(), "X")
-    assert not r.valid
-    assert r.status == "NONE"
+from tests.synthetic import make_downtrend, make_two_base_4h
+from vcp.detector import zigzag
+from vcp.engine import DEFAULTS, analyze, replay, simulate
 
 
 def test_zigzag_alternates():
-    import numpy as np
     h = np.array([10, 9, 8, 9.5, 10.5, 9, 8.8, 10])
     p = zigzag(h, h, 0.05)
     types = [t for _, _, t in p]
     assert all(a != b for a, b in zip(types, types[1:]))
 
 
-def test_trade_plan_levels():
-    from vcp.trade import make_plan
-    r = detect_vcp(make_vcp(), "X")
-    p = make_plan(r, {"account_usdt": 1000, "risk_per_trade_pct": 0.01})
-    assert p.stop < r.contractions[-1].trough < r.pivot < p.entry < p.tp1 < p.tp2
-    assert abs(p.risk_usdt - 10) < 0.01 or "封顶" in p.warn
-    assert abs((p.tp2 - p.entry) / (p.entry - p.stop) - 3) < 1e-9
+def test_two_bases_like_master_chart():
+    df, d1 = make_two_base_4h()
+    s = analyze("X", df, d1)
+    assert [b.no for b in s.bases] == [1, 2]
+    b1, b2 = s.bases
+    assert b1.ok and len(b1.cons) == 2 and 0.10 < b1.cons[0].depth < 0.16
+    assert b2.current and b2.status == "CONFIRMED"
+    assert 0.15 < b2.cons[0].depth < 0.19 and b2.cons[-1].depth < 0.08
+    assert s.stage["label"] == "NEW/S2"
+    assert s.status == "SETUP"
+    assert s.stop < b2.cons[-1].trough < b2.cons[-1].peak < s.entry < s.be < s.plan_tp
+    assert abs((s.plan_tp - s.entry) / (s.entry - s.stop) - 5) < 1e-9
 
 
-def test_validation_finds_successful_breakout():
-    from vcp.detector import DEFAULTS
-    from vcp.trade import validate_symbol
-    df = make_vcp(breakout=True, follow=25)
-    trades = validate_symbol(df, "X", DEFAULTS, {}, {"lookback_bars": 60})
-    assert trades, "should replay the historical breakout"
-    t = trades[0]
-    assert t["tp1_hit"] and t["r"] > 0
+def test_breakout_scores_pivot_and_volume():
+    df, d1 = make_two_base_4h(breakout=True)
+    s = analyze("X", df, d1)
+    assert s.status == "BREAKOUT"
+    assert "Pivot突破" in s.c[1]
+    assert s.c[0] == 3.0                      # C1偏小 + Base确认 + 第2Base + Pivot突破，和师父的例子一致
+    assert s.rating in ("GOOD", "EXCELLENT")
+
+
+def test_position_size_risks_one_percent():
+    df, d1 = make_two_base_4h()
+    s = analyze("X", df, d1, {"account_usdt": 1000, "risk_per_trade_pct": 0.01, "liquidity_cap_pct": 100})
+    assert abs(s.size["loss"] - 10) < 0.01
+
+
+def test_downtrend_rejected():
+    df = make_downtrend()
+    s = analyze("X", df, df)
+    assert not s.valid and s.status == "NONE"
+
+
+def test_replay_and_simulate():
+    df, d1 = make_two_base_4h(breakout=True)
+    trades = replay("X", df, d1, 300)
+    assert any(t["idx"] == len(df) - 1 for t in trades), "最后一根突破应在回放中触发"
+    # 手工验证模拟：入场后直接涨到 5R → 计划止盈
+    s = analyze("X", df.iloc[:-1], d1)
+    fake = df.copy()
+    fake.loc[len(fake) - 1, "high"] = s.plan_tp * 1.01
+    res = simulate(fake, len(fake) - 1, s.entry, s, DEFAULTS)
+    assert res["outcome"] == "计划止盈达成" and abs(res["r"] - 5) < 1e-6

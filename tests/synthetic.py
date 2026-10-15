@@ -51,3 +51,33 @@ def make_downtrend(seed=3):
         "time": pd.date_range("2025-01-01", periods=n, freq="D", tz="UTC"),
         "open": openp, "high": np.maximum(openp, close) * 1.01, "low": np.minimum(openp, close) * 0.99,
         "close": close, "volume": np.full(n, 1e6)})
+
+
+def make_two_base_4h(seed=11, breakout=False, follow=0):
+    """模拟师父截图那种走势：起涨 → B1(13%,3%) → 突破上涨 → B2(16.8%,5.8%) → 接近 pivot。返回 (4h, 日线)。"""
+    rng = np.random.default_rng(seed)
+    pts = [(0, 0.0080), (90, 0.0105),                       # 起涨
+           (12, 0.00915), (14, 0.0102), (6, 0.00990), (6, 0.0104),   # B1: C1≈13%  C2≈3%
+           (60, 0.0147),                                    # 突破后上涨到 B2 高点
+           (25, 0.01225), (30, 0.01335), (10, 0.01262), (12, 0.01330)]  # B2: C1≈16.8% C2≈5.5%
+    close = _path(pts, rng, noise=0.004)
+    n = len(close)
+    vol = np.full(n, 4e4) * (1 + rng.uniform(-0.2, 0.2, n))
+    vol[-40:] *= 0.6                                        # 末段缩量
+    if breakout:
+        close = np.append(close, 0.01350)
+        vol = np.append(vol, 1.2e5)
+        n += 1
+    if follow:  # 突破后继续上涨
+        close = np.append(close, np.linspace(close[-1], close[-1] * 1.45, follow + 1)[1:])
+        vol = np.append(vol, np.full(follow, 6e4))
+        n += follow
+    openp = np.r_[close[0], close[:-1]]
+    high = np.maximum(openp, close) * (1 + rng.uniform(0.0005, 0.003, n))
+    low = np.minimum(openp, close) * (1 - rng.uniform(0.0005, 0.003, n))
+    t = pd.date_range("2026-06-01", periods=n, freq="4h", tz="UTC")
+    df = pd.DataFrame({"time": t, "open": openp, "high": high, "low": low, "close": close, "volume": vol})
+    d1 = (df.set_index("time").resample("1D")
+          .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+          .dropna().reset_index())
+    return df, d1

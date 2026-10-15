@@ -1,4 +1,5 @@
-# 免费云端自动扫描：GitHub 每 4 小时运行一次（日线收盘后 00:10 UTC 必跑）
+# 免费云端自动扫描：每 2 小时运行一次（第 17 分钟，避开整点高峰）
+# GitHub 的定时任务经常延迟甚至跳过，所以排得比需要的更密，保证实际间隔不会太长
 # 需在仓库 Settings → Secrets and variables → Actions 添加：
 #   TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID
 # 注意：GitHub 服务器在美国，Binance/Bybit 会拒绝访问，程序会自动改用 OKX / Gate（同币种形态几乎一致）
@@ -6,8 +7,12 @@ name: VCP Scan
 
 on:
   schedule:
-    - cron: "10 0,4,8,12,16,20 * * *"
+    - cron: "17 */2 * * *"
   workflow_dispatch: {}      # 也可以在 Actions 页面手动点 Run workflow
+
+concurrency:
+  group: vcp-scan
+  cancel-in-progress: false
 
 jobs:
   scan:
