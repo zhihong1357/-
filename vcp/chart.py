@@ -1,4 +1,7 @@
-"""把 VCP 形态画成图：K线 + 均线 + 每段收缩（标注回撤%）+ pivot 线 + 成交量。"""
+"""
+信号图（参照师父的图表样式）：深色背景 K线 + MA50/150/200 + 每个 Base 方框 + 每段收缩虚线框（B2C1 16.8%）
++ Entry / Stop / BE / Plan TP / Chart TP 价位线 + 左上角信息面板 + 成交额副图。
+"""
 from __future__ import annotations
 
 import matplotlib
@@ -7,101 +10,154 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+from matplotlib.patches import Rectangle  # noqa: E402
+from matplotlib.ticker import FuncFormatter  # noqa: E402
 
-from .detector import VCPResult  # noqa: E402
-
+BG, PANEL, GRID, TEXT = "#0e1117", "#131722", "#232a36", "#c9d1d9"
 UP, DOWN = "#26a69a", "#ef5350"
-SEG_COLORS = ["#ff9800", "#ab47bc", "#42a5f5", "#66bb6a", "#ec407a", "#8d6e63"]
+MA_COLORS = {50: "#f5a623", 150: "#2f80ed", 200: "#e0457b"}
+BASE_COLORS = ["#4fc3f7", "#66bb6a", "#ffb74d", "#ba68c8", "#f06292"]
+C_COLOR = "#e6c229"
 
 
-def plot_vcp(df: pd.DataFrame, r: VCPResult, path: str, title: str = "", ma=(50, 150, 200),
-             plan=None, entry_idx=None, exit_idx=None) -> str:
+def fp(p: float) -> str:
+    """价格格式：保留 5 位有效数字。"""
+    if p is None or not np.isfinite(p) or p <= 0:
+        return "-"
+    dec = max(2, 4 - int(np.floor(np.log10(p))))
+    return f"{p:.{dec}f}"
+
+
+def display_symbol(sym: str) -> str:
+    """OKX 的 CTR-USDT-SWAP / Gate 的 CTR_USDT 统一显示成 CTRUSDT.P"""
+    return sym.upper().replace("-SWAP", "").replace("-", "").replace("_", "") + ".P"
+
+
+def fmoney(x: float) -> str:
+    x = float(x or 0)
+    if x >= 1e9:
+        return f"${x / 1e9:.2f}B"
+    if x >= 1e6:
+        return f"${x / 1e6:.2f}M"
+    if x >= 1e3:
+        return f"${x / 1e3:.1f}K"
+    return f"${x:.0f}"
+
+
+def plot_signal(df: pd.DataFrame, sig, path: str, tf: str = "4h", title_extra: str = "",
+                entry_idx: int | None = None, exit_idx: int | None = None, outcome: str = "") -> str:
     df = df.reset_index(drop=True)
-    start = max(0, (r.base_start_idx or len(df) - 120) - 60)
+    n = len(df)
+    first_base = sig.bases[0].start if sig.bases else max(0, n - 200)
+    start = max(0, min(first_base - 30, n - 120))
     d = df.iloc[start:].reset_index(drop=True)
-    x = np.arange(len(d))
     off = start
+    x = np.arange(len(d))
+    right = len(d) + 14
 
-    fig, (ax, axv) = plt.subplots(2, 1, figsize=(13, 7.5), sharex=True,
-                                  gridspec_kw={"height_ratios": [3.2, 1]}, dpi=110)
-    fig.patch.set_facecolor("white")
+    fig, (ax, axv) = plt.subplots(2, 1, figsize=(16, 8.6), sharex=True,
+                                  gridspec_kw={"height_ratios": [3.4, 1]}, dpi=100)
+    fig.patch.set_facecolor(BG)
+    for a in (ax, axv):
+        a.set_facecolor(PANEL)
+        a.tick_params(colors=TEXT, labelsize=8)
+        for s in a.spines.values():
+            s.set_color(GRID)
+        a.grid(color=GRID, linewidth=0.6)
+        a.yaxis.tick_right()
 
     # K线
-    up = d["close"] >= d["open"]
-    colors = np.where(up, UP, DOWN)
-    ax.vlines(x, d["low"], d["high"], color=colors, linewidth=0.8)
-    body_lo = np.minimum(d["open"], d["close"])
-    body_h = np.maximum((d["close"] - d["open"]).abs(), (d["high"] - d["low"]) * 0.002)
-    ax.bar(x, body_h, bottom=body_lo, color=colors, width=0.7, linewidth=0)
+    up = (d["close"] >= d["open"]).to_numpy()
+    col = np.where(up, UP, DOWN)
+    ax.vlines(x, d["low"], d["high"], color=col, linewidth=0.7)
+    lo = np.minimum(d["open"], d["close"])
+    hgt = np.maximum((d["close"] - d["open"]).abs(), (d["high"] - d["low"]) * 0.003)
+    ax.bar(x, hgt, bottom=lo, color=col, width=0.65, linewidth=0)
 
-    # 均线
-    for m, col in zip(ma, ["#1e88e5", "#fb8c00", "#8e24aa"]):
-        s = df["close"].rolling(m).mean().iloc[start:].to_numpy()
-        if np.isfinite(s).any():
-            ax.plot(x, s, color=col, linewidth=1.1, label=f"MA{m}")
+    for k, c in MA_COLORS.items():
+        m = df["close"].rolling(k).mean().iloc[start:].to_numpy()
+        if np.isfinite(m).any():
+            ax.plot(x, m, color=c, linewidth=1.1, label=f"MA{k}")
 
-    # 底部区间
-    if r.base_start_idx is not None:
-        ax.axvspan(r.base_start_idx - off, len(d) - 1, color="#fff8e1", alpha=0.6, zorder=0)
+    # Base 方框 + 收缩虚线框
+    for b in sig.bases:
+        bc = BASE_COLORS[(b.no - 1) % len(BASE_COLORS)]
+        x0, x1 = b.start - off, min(b.end, n) - off - 1
+        if x1 < 0:
+            continue
+        ax.add_patch(Rectangle((x0, b.low), max(x1 - x0, 1), b.high - b.low, fill=True, facecolor=bc,
+                               alpha=0.07, edgecolor=bc, linewidth=1.6))
+        ax.add_patch(Rectangle((x0, b.low), max(x1 - x0, 1), b.high - b.low, fill=False, edgecolor=bc,
+                               linewidth=1.6))
+        if b.current:
+            ax.hlines([b.high, b.low], 0, right, colors=bc, linewidth=0.8, alpha=0.6)
+        ax.text(x0, b.high, f" B{b.no} {b.status}", color=bc, fontsize=8, va="bottom", fontweight="bold")
+        for i, c in enumerate(b.cons):
+            cx0, cx1 = c.peak_idx - off, c.trough_idx - off
+            ax.add_patch(Rectangle((cx0, c.trough), max(cx1 - cx0, 1), c.peak - c.trough, fill=True,
+                                   facecolor=C_COLOR, alpha=0.12, edgecolor=C_COLOR, linestyle="--", linewidth=1.1))
+            ax.plot([cx0, cx1], [c.peak, c.trough], color=C_COLOR, linewidth=0.8, alpha=0.7)
+            ax.text((cx0 + cx1) / 2, c.trough, f"B{b.no}C{i + 1} {c.depth * 100:.1f}%", fontsize=7, color="#111",
+                    ha="center", va="top", bbox=dict(boxstyle="square,pad=0.15", fc=C_COLOR, ec="none"))
 
-    # 每段收缩
-    for i, c in enumerate(r.contractions):
-        col = SEG_COLORS[i % len(SEG_COLORS)]
-        x0, x1 = c.peak_idx - off, c.trough_idx - off
-        ax.plot([x0, x1], [c.peak, c.trough], color=col, linewidth=2.2)
-        ax.scatter([x0], [c.peak], color=col, marker="v", s=50, zorder=5)
-        ax.scatter([x1], [c.trough], color=col, marker="^", s=50, zorder=5)
-        ax.annotate(f"T{i+1} -{c.depth*100:.1f}%", xy=(x1, c.trough),
-                    xytext=(4, -14), textcoords="offset points", color=col, fontsize=10, fontweight="bold")
-        ax.hlines([c.peak, c.trough], x0, max(x1, x0 + 1), colors=col, linestyles=":", linewidth=1)
+    # 价位线
+    xs = (entry_idx - off) if entry_idx is not None else max(0, len(d) - 40)
+    levels = [("Plan TP", sig.plan_tp, "#42a5f5", (0, (2, 3))), ("Chart TP", sig.chart_tp, "#66bb6a", "-"),
+              ("BE", sig.be, "#9e9e9e", (0, (1, 3))), ("ENTRY", sig.entry, "#26c6da", (0, (3, 3))),
+              ("STOP", sig.stop, "#ef5350", "-")]
+    for name, price, c, ls in levels:
+        if not price:
+            continue
+        ax.hlines(price, xs, right, colors=c, linewidth=1.0, linestyles=ls)
+        ax.text(right, price, f" {name} {fp(price)} ", color="#0e1117", fontsize=8, va="center", ha="left",
+                fontweight="bold", bbox=dict(boxstyle="square,pad=0.2", fc=c, ec="none"), clip_on=False)
+    if entry_idx is not None and sig.entry:
+        ax.scatter([entry_idx - off], [sig.entry], marker="^", s=120, color="#26c6da", zorder=6,
+                   edgecolors="white", linewidths=0.6)
+    if exit_idx is not None:
+        ax.axvline(exit_idx - off, color="#9e9e9e", linestyle=":", linewidth=1)
+        ax.text(exit_idx - off, ax.get_ylim()[0], f" EXIT {outcome}", color=TEXT, fontsize=8, va="bottom")
 
-    # pivot
-    if r.pivot:
-        x0 = (r.pivot_idx or 0) - off
-        ax.hlines(r.pivot, x0, len(d) - 1 + 3, colors="#d32f2f", linestyles="--", linewidth=1.6)
-        if plan is None:
-            ax.text(len(d) + 3, r.pivot, f" Pivot {r.pivot:.6g}", color="#d32f2f", va="bottom", fontsize=10,
-                    fontweight="bold")
-        else:  # 有交易计划时，pivot 标签放左边，避免和进场价重叠
-            ax.text(x0, r.pivot, f"Pivot {r.pivot:.6g} ", color="#d32f2f", va="bottom", ha="right", fontsize=9,
-                    fontweight="bold")
+    # 信息面板
+    b = sig.base
+    hist = " -> ".join(x.label() for x in sig.bases) or "-"
+    cdet = " | ".join(" ".join(f"B{x.no}C{i + 1}:{c.depth * 100:.1f}%" for i, c in enumerate(x.cons))
+                      for x in sig.bases if x.cons)
+    info = [
+        f"{display_symbol(sig.symbol)} | {sig.stage.get('label', '')} | {tf} | LONG",
+        f"Base {b.no if b else '-'} {b.status if b else ''} | {cdet}",
+        f"Bases: {hist}",
+        f"SCV: {sig.total:+.1f} {sig.rating}  (S{sig.s[0]:+.1f} C{sig.c[0]:+.1f} V{sig.v[0]:+.1f})",
+        f"Last {tf} Vol: {fmoney(sig.vol.get('last'))}  ({sig.vol.get('ratio', 0):.2f}x MA50)",
+        f"Est 24h Vol: {fmoney(sig.vol.get('est24h'))}",
+    ]
+    if sig.entry:
+        rr = f" R:R {sig.plan_rr:.2f}" if sig.plan_rr else ""
+        info.append(f"Ent:{fp(sig.entry)} SL:{fp(sig.stop)} TP:{fp(sig.plan_tp)}{rr}")
+    ax.text(0.006, 0.985, "\n".join(info), transform=ax.transAxes, va="top", ha="left", fontsize=8.2,
+            family="monospace", color="#8bd17c",
+            bbox=dict(boxstyle="square,pad=0.4", fc="#0b0f14", ec="#3a7d44", alpha=0.92))
 
-    # 交易计划：进场 / 止损 / 止盈线
-    if plan is not None:
-        xs = (entry_idx - off) if entry_idx is not None else len(d) - 1
-        xe = len(d) - 1 + 8
-        for price, col, name in [(plan.entry, "#1565c0", "Entry"), (plan.stop, "#c62828", "Stop"),
-                                 (plan.tp1, "#2e7d32", "TP1"), (plan.tp2, "#1b5e20", "TP2")]:
-            ax.hlines(price, xs, xe, colors=col, linewidth=1.3, linestyles="-." if name != "Entry" else "-")
-            ax.text(xe, price, f" {name} {price:.6g}", color=col, va="center", fontsize=9, fontweight="bold")
-        ax.fill_between([xs, xe], plan.stop, plan.entry, color="#ffcdd2", alpha=0.35, linewidth=0)
-        ax.fill_between([xs, xe], plan.entry, plan.tp2, color="#c8e6c9", alpha=0.3, linewidth=0)
-        if entry_idx is not None:
-            ax.scatter([entry_idx - off], [plan.entry], marker="*", s=180, color="#1565c0", zorder=6)
-        if exit_idx is not None:
-            ax.axvline(exit_idx - off, color="#616161", linestyle=":", linewidth=1)
+    ttl = f"{display_symbol(sig.symbol)}  {tf}  LONG" + (f"   {title_extra}" if title_extra else "")
+    ax.set_title(ttl, color=TEXT, fontsize=12, fontweight="bold")
+    leg = ax.legend(loc="lower left", fontsize=8, facecolor=PANEL, edgecolor=GRID)
+    for t in leg.get_texts():
+        t.set_color(TEXT)
+    ax.set_xlim(-1, right + 12)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: fp(v)))
 
-    st = {"BREAKOUT": "BREAKOUT", "SETUP": "SETUP (near pivot)"}.get(r.status, r.status)
-    head = title or r.symbol
-    ax.set_title(f"{head}   VCP: {st}   contractions: {r.depths_text()}   score {r.score}",
-                 fontsize=11, loc="left")
-    ax.legend(loc="upper left", fontsize=8)
-    ax.grid(alpha=0.25)
-    ax.set_xlim(-1, len(d) + (22 if plan is not None else 12))
-
-    # 成交量
-    axv.bar(x, d["volume"], color=colors, width=0.7, alpha=0.8)
+    # 成交额
+    axv.bar(x, d["volume"], color=col, width=0.65, alpha=0.85)
     vma = df["volume"].rolling(50, min_periods=10).mean().iloc[start:].to_numpy()
-    axv.plot(x, vma, color="#455a64", linewidth=1, label="Vol MA50")
-    axv.legend(loc="upper left", fontsize=8)
-    axv.grid(alpha=0.25)
-    axv.set_ylabel("Volume (USDT)")
-
-    ticks = np.linspace(0, len(d) - 1, 8).astype(int)
+    axv.plot(x, vma, color="#f5a623", linewidth=1)
+    axv.yaxis.set_major_formatter(FuncFormatter(lambda v, _: fmoney(v)))
+    axv.set_ylabel("Vol ($)", color=TEXT, fontsize=8)
+    axv.yaxis.set_label_position("right")
+    ticks = np.linspace(0, len(d) - 1, 9).astype(int)
     axv.set_xticks(ticks)
-    axv.set_xticklabels([d["time"].iloc[t].strftime("%Y-%m-%d") if "time" in d else str(t) for t in ticks],
-                        fontsize=8)
+    axv.set_xticklabels([d["time"].iloc[t].strftime("%m/%d %H:%M") for t in ticks], color=TEXT, fontsize=8)
+
     fig.tight_layout()
-    fig.savefig(path)
+    fig.savefig(path, facecolor=BG)
     plt.close(fig)
     return path

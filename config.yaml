@@ -8,17 +8,11 @@
 # 也可以直接写 binance / bybit / okx / gate
 exchange: auto
 
-# K线周期：1d(日线，Minervini 原版用日线/周线)  4h  1h  1w
-interval: 1d
-
 # 只扫 24 小时成交额大于这个数（USDT）的合约，过滤流动性差的小币
 min_quote_volume_24h: 3000000      # 300 万 USDT（调低=扫更多币，但小币滑点大）
 
 # 每次最多扫多少个币（按成交额从大到小），0 = 不限
 max_symbols: 0
-
-# 拉多少根K线（日线 400 根 ≈ 1 年多，够算 MA200 和 52 周高低点）
-kline_limit: 400
 
 # 黑名单：不想扫的币
 exclude: [USDCUSDT, BTCDOMUSDT]
@@ -46,60 +40,59 @@ telegram:
 discord:
   webhook_url: ""
 
-# ---------- VCP 判定规则（全部客观量化，可按需调整） ----------
-vcp:
-  # 1) 趋势模板（第二阶段上升趋势）
-  require_trend_template: true
-  ma_fast: 50
-  ma_mid: 150
-  ma_slow: 200
-  ma_slow_rising_bars: 20         # MA200 比 20 根K线前高 = 向上
+# ---------- 策略（日线判断阶段 + 4h 找收缩和进场，全部客观量化） ----------
+strategy:
+  exec_tf: 4h                     # 执行周期：找 Base / 收缩 / 进场
+  stage_tf: 1d                    # 阶段周期：判断是否 Stage 2
+  exec_bars: 600                  # 4h 拉 600 根（约 100 天）
+  stage_bars: 400                 # 日线拉 400 根
+
+  # 1) 阶段（日线，Minervini 趋势模板）
+  new_listing_bars: 200           # 日线不足 200 根 = 新币 NEW（用 MA50/MA20 判断趋势）
   min_above_low_pct: 0.30         # 现价 ≥ 52 周低点 × 1.30
   max_below_high_pct: 0.25        # 现价 ≥ 52 周高点 × 0.75
-  year_bars: 365                  # 日线一年 365 根（4h 周期请改成 2190）
-  min_history_bars: 120           # 上市不足 120 根K线的币不扫
 
-  # 2) 底部 & 收缩
-  base_min_bars: 15               # 底部最短 15 根K线
-  base_max_bars: 180              # 底部最长 180 根K线
-  zigzag_pct: 0.04                # 摆动点识别灵敏度（4%）
-  recovery_ratio: 0.5             # 反弹收回上段跌幅 50% 以上，才算开始新一段收缩
-  min_contractions: 2             # 至少 2 次收缩（T2）
+  # 2) Base 与收缩（4h）
+  base_min_depth: 0.08            # 从高点回撤 ≥ 8% 才算开始一个新 Base（B1、B2…）
+  base_min_bars: 10               # Base 至少 10 根 4h K线
+  zigzag_pct: 0.03                # 摆动点灵敏度 3%
+  recovery_ratio: 0.35            # 反弹收回上段跌幅 ≥ 35% 才算新一段收缩
+  min_contractions: 2
   max_contractions: 6
-  max_first_depth: 0.35           # 第一次回撤 ≤ 35%（Minervini 原版标准）
-  max_last_depth: 0.15            # 最后一次回撤 ≤ 15%（越小越紧）
-  contraction_tolerance: 0.10     # 允许后一段比前一段大 10% 以内（相对）
-  require_higher_lows: false      # true = 要求每段低点逐步抬高（更严格）
-  prior_uptrend_pct: 0.30         # 底部之前要有 ≥30% 的上涨
-  prior_uptrend_bars: 120
+  max_first_depth: 0.35           # C1 ≤ 35%（Minervini 原版）
+  max_last_depth: 0.15            # 最后一段 ≤ 15%
+  contraction_tolerance: 0.10     # 后一段可比前一段大 10%（相对）以内
+  small_c1_pct: 0.20              # C1 ≤ 20% → “C1偏小”加分
 
-  # 3) 成交量萎缩
-  require_volume_dryup: true
+  # 3) 进场 / 止损 / 止盈
+  entry_buffer: 0.005             # 挂单缓冲：Entry = Pivot × 1.005
+  stop_buffer: 0.005              # Stop = 末段收缩低点 × 0.995
+  be_r: 0.8                       # 涨到 Entry + 0.8R → 止损移到入场价（保本）
+  plan_r: 5                       # 计划止盈 Plan TP = Entry + 5R
+  chart_tp_lookback: 180          # 结构止盈 Chart TP = 最近 180 根 4h 的最高点
+  near_entry_pct: 0.03            # 现价在 Entry 下方 3% 内 → SETUP（接近入场）
+  max_extension_pct: 0.03         # 已高出 Entry 3% 以上不再提醒（防追高）
+  breakout_lag_bars: 3            # 最近 3 根 4h 内收盘突破都算 BREAKOUT
+  max_hold_bars: 180              # 历史回放最多持有 180 根 4h（30 天）
+
+  # 4) 成交量
   volume_ma: 50
-  dryup_recent_bars: 5            # 最近 5 根平均量 < 50 均量
-  dryup_ratio: 1.0
+  vol_expansion: 1.2              # 成交额 ≥ 均线 1.2 倍 = 放量
+  vol_quiet: 0.8                  # < 0.8 倍 = 缩量
+  liquidity_cap_pct: 0.10         # 单笔上限 = 最新 4h 成交额的 10%
 
-  # 4) 信号
-  pivot_proximity_pct: 0.06       # 现价在 pivot 下方 6% 内 → SETUP
-  breakout_volume_ratio: 1.5      # 突破K线成交量 ≥ 50 均量 × 1.5 → BREAKOUT
-  breakout_max_extension: 0.05    # 收盘已高出 pivot 5% 以上就不再提醒（防追高）
+  # 5) 评级：WEAK < FAIR < GOOD < EXCELLENT，低于 min_rating 不提醒
+  min_rating: FAIR
 
-# ---------- 交易计划（每个信号都会附上：进场/止损/止盈/盈亏比/仓位） ----------
-trade:
-  account_usdt: 1000              # 你的账户资金（USDT），用来算仓位
-  risk_per_trade_pct: 0.01        # 每笔最多亏账户的 1%（打到止损时）
-  max_leverage: 5                 # 仓位最多用到 5 倍杠杆
-  entry_buffer: 0.002             # 突破单挂在 pivot 上方 0.2%
-  stop_buffer: 0.005              # 止损放在最后一次收缩低点下方 0.5%
-  max_stop_pct: 0.08              # 止损距离超过 8% 会提示风险偏大（Minervini 7~8% 原则）
-  tp1_r: 2                        # 止盈1 = 进场 + 2R（R = 进场价 - 止损价）
-  tp1_close_pct: 0.5              # 到止盈1平掉 50%，剩余止损移到进场价（保本）
-  tp2_r: 3                        # 止盈2 = 进场 + 3R，全部平仓
-  max_hold_bars: 60               # 最多持有 60 根K线，没走完按收盘离场
+# ---------- 账户（用来算仓位） ----------
+account:
+  account_usdt: 1000              # 你的账户资金（USDT）
+  risk_per_trade_pct: 0.01        # 每笔打到止损最多亏账户 1%
+  max_leverage: 5                 # 仓位最多 5 倍杠杆
+  max_risk_pct: 0.10              # 入场风险 > 10% → 半仓（HALF_SIZE）
 
-# ---------- 历史验证（用同一套规则回放过去的行情，找出真实成功的 VCP） ----------
+# ---------- 历史回放（用同一套规则重演过去行情，验证信号是否真的有效） ----------
 validation:
   enabled: true
-  lookback_bars: 250              # 回看最近 250 根K线（日线约 8 个月）
+  lookback_bars: 300              # 回放最近 300 根 4h（约 50 天）
   show_cases: 3                   # 每次发最近 3 个历史案例（优先成功的；同一笔只发一次，结果变化时再发）
-
