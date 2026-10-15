@@ -60,7 +60,7 @@ Mac / Linux：在终端运行 `./run_mac_linux.sh`
 
 ## 不想开着电脑？用 GitHub 免费云端自动跑（可选）
 
-本仓库已包含 `.github/workflows/vcp-scan.yml`，每 4 小时自动扫描一次（UTC 00:10 日线收盘后必跑）。
+本仓库已包含 `.github/workflows/vcp-scan.yml`，每 2 小时自动扫描一次（GitHub 定时任务常会延迟或跳过，所以排得比较密；汇总消息最多 4 小时发一次）。
 1. 仓库页面 → **Settings → Secrets and variables → Actions → New repository secret**
 2. 添加 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 两个 secret（值同第 3 步；chat_id 可用 @userinfobot 查到）。**不要把 token 直接写进仓库里的 `config.yaml`**，别人看到就能用你的机器人
 3. 打开 **Actions** 页面 → 选 **VCP Scan** → **Run workflow** 手动试一次，Telegram 会收到一条「📊 VCP 扫描完成」汇总

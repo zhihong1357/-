@@ -194,6 +194,7 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
 
     state = load_state()
     alert_on = set(cfg.get("alert_on") or ["BREAKOUT", "SETUP"])
+    new_alerts = 0
     print()
     print("=" * 70)
     if not hits:
@@ -211,6 +212,7 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
             if notifier.enabled:
                 notifier.send(alert_text(r, ex.name, cfg["interval"], plan, cfg), img)
             state[key] = time.time()
+            new_alerts += 1
     if forming:
         print(f"\n另有 {len(forming)} 个币形态成立但离 pivot 还远（观察名单）: "
               + ", ".join(r.symbol for r in sorted(forming, key=lambda r: -r.score)[:20]))
@@ -218,7 +220,12 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     save_state(state)
 
     # 每轮扫描结束发一条简短汇总，让你知道机器人在正常工作
-    if notifier.enabled and cfg.get("send_summary", True):
+    # 汇总最多每 summary_every_hours 小时发一次（本轮有新提醒时照常发），避免频繁运行时刷屏
+    gap = float(cfg.get("summary_every_hours", 4)) * 3600 - 600
+    due = time.time() - state.get("_last_summary", 0) >= gap or new_alerts > 0
+    if notifier.enabled and cfg.get("send_summary", True) and due:
+        state["_last_summary"] = time.time()
+        save_state(state)
         watch = ", ".join(r.symbol for r in sorted(forming, key=lambda r: -r.score)[:10])
         lines = [f"📊 VCP 扫描完成 ({ex.name} · {cfg['interval']})",
                  f"交易所共 {len(vols)} 个 USDT 永续，成交额达标并扫描 {len(results)} 个",

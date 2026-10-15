@@ -32,6 +32,7 @@ alert_on: [BREAKOUT, SETUP]       # BREAKOUT=带量突破  SETUP=形态成立、
 # 每轮扫描完都发一条汇总（即使没有信号），用来确认机器人在正常工作
 # 嫌消息多可以改成 false，之后只有出现信号才会提醒
 send_summary: true
+summary_every_hours: 4            # 汇总最多每 4 小时发一次；有信号时不受限制
 
 # 生成图表：all = 每个符合的币都画；none = 不画
 charts: all
