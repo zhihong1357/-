@@ -144,8 +144,8 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     table.to_csv(run_dir / "all_results.csv", index=False, encoding="utf-8-sig")
 
     hits = [r for r in results if r.status in ("BREAKOUT", "SETUP")]
-    hits.sort(key=lambda r: (r.status != "BREAKOUT", -r.total))
-    watch = sorted([r for r in results if r.valid and r.status == "NONE"], key=lambda r: -r.total)
+    hits.sort(key=lambda r: (r.status != "BREAKOUT", -r.score, -r.total))
+    watch = sorted([r for r in results if r.valid and r.status == "NONE"], key=lambda r: (-r.score, -r.total))
 
     state = load_state()
     alert_on = set(cfg.get("alert_on") or ["BREAKOUT", "SETUP"])
@@ -154,7 +154,7 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
     if not hits:
         print("本轮没有接近入场 / 突破的 VCP。")
     for r in hits:
-        print(f"[{r.status:8}] {display_symbol(r.symbol):16} {r.rating:9} {r.total:+.1f}  "
+        print(f"[{r.status:8}] {display_symbol(r.symbol):16} {r.rating:9} {r.score}/3  "
               f"B{r.base.no} {r.stage['label']}  Entry {r.entry:.6g}  Stop {r.stop:.6g}")
         img = None
         if cfg.get("charts", "all") != "none":
@@ -186,7 +186,7 @@ def scan_once(cfg: dict, notifier: Notifier) -> pd.DataFrame:
                  f"突破 BREAKOUT: {sum(r.status == 'BREAKOUT' for r in hits)} 个",
                  f"接近入场 SETUP: {sum(r.status == 'SETUP' for r in hits)} 个"]
         if hits:
-            lines.append("信号: " + ", ".join(f"{display_symbol(r.symbol)}({r.rating})" for r in hits[:15]))
+            lines.append("信号: " + ", ".join(f"{display_symbol(r.symbol)}({r.score}/3)" for r in hits[:15]))
         if watch:
             lines.append("观察名单: " + ", ".join(display_symbol(r.symbol) for r in watch[:10]))
         if cfg["validation"].get("enabled", True):
@@ -211,27 +211,37 @@ EN = {"计划止盈达成": "TP HIT", "部分止盈后离场": "PARTIAL+EXIT", "
       "持仓中": "OPEN", "止损": "STOPPED", "到期离场": "TIME EXIT"}
 
 
+def _bucket_line(label: str, ts: list) -> str:
+    closed = [t for t in ts if not t["open"]]
+    if not closed:
+        return f"{label}: {len(ts)} 笔（都还在持仓中）"
+    win = sum(t["r"] > 0 for t in closed)
+    avg = sum(t["r"] for t in closed) / len(closed)
+    sl = sum(t["outcome"] == "止损" for t in closed)
+    return (f"{label}: 已结束 {len(closed)} 笔 | 盈利 {win} | 止损 {sl} | 胜率 {win / len(closed) * 100:.0f}% | "
+            f"平均 {avg:+.2f}R | 合计 {sum(t['r'] for t in closed):+.1f}R")
+
+
 def validation_stats(trades: list, cfg: dict) -> list[str]:
     sc, look = cfg["strategy"], cfg["validation"]["lookback_bars"]
     span = f"最近 {look} 根 {sc['exec_tf']}"
     if not trades:
         return [f"🧪 历史回放({span}): 这段时间没有触发过入场"]
-    closed = [t for t in trades if not t["open"]]
-    out = [f"🧪 历史回放({span}，同一套规则):",
-           f"触发入场 {len(trades)} 次：已结束 {len(closed)} 次，持仓中 {len(trades) - len(closed)} 次"]
-    if closed:
-        wins = [t for t in closed if t["success"]]
-        sl = [t for t in closed if t["outcome"] == "止损"]
-        be = [t for t in closed if t["outcome"] == "保本离场"]
-        avg = sum(t["r"] for t in closed) / len(closed)
-        out += [f"止损 {len(sl)} | 保本 {len(be)} | 盈利≥1R {len(wins)}/{len(closed)}（按 {PROFILES[sc['exit_profile']]['name']} 出场）",
-                f"已结束交易平均每笔: {avg:+.2f}R（不含手续费/资金费/滑点）"]
-    else:
-        out.append("还没有已结束的交易，暂时无法计算成功率")
-    # 同一批入场，三种出场方案的对比（只算已结束的）
-    out.append("出场方案对比（同一批入场）:")
+    taken = [t for t in trades if t["taken"]]
+    skipped = [t for t in trades if not t["taken"]]
+    out = [f"🧪 历史回放({span}，同一套规则，按 {PROFILES[sc['exit_profile']]['name']} 出场):",
+           f"所有 VCP 突破 {len(trades)} 次；评级 ≥ {sc['min_rating']}（会提醒/会做）{len(taken)} 次，"
+           f"低分被过滤 {len(skipped)} 次",
+           _bucket_line("✅ 高分（照做）", taken),
+           _bucket_line("🚫 低分（不做）", skipped),
+           "按分数分组（检验扣分制是否有效：分数越高结果应越好）:"]
+    for sc_ in (3, 2, 1, 0, -1, -2, -3):
+        g = [t for t in trades if t["score"] == sc_]
+        if g:
+            out.append("  " + _bucket_line(f"Score {sc_}", g))
+    out.append("出场方案对比（只算高分入场）:")
     for name, prof in PROFILES.items():
-        res = [t["by_profile"][name] for t in trades if not t["by_profile"][name]["open"]]
+        res = [t["by_profile"][name] for t in taken if not t["by_profile"][name]["open"]]
         mark = "👉" if name == sc["exit_profile"] else "  "
         if not res:
             out.append(f"{mark}{prof['name']}: 暂无已结束交易")
@@ -241,8 +251,9 @@ def validation_stats(trades: list, cfg: dict) -> list[str]:
         out.append(f"{mark}{prof['name']}: {len(res)} 笔，盈利 {win} 笔，平均 {avg:+.2f}R，合计 {sum(x['r'] for x in res):+.1f}R")
     for t in sorted(trades, key=lambda t: t["time"], reverse=True)[:10]:
         out.append(f"{ICON.get(t['outcome'], '•')} {display_symbol(t['symbol'])} "
-                   f"{pd.Timestamp(t['time']):%m-%d %H:%M} {t['outcome']} {t['r']:+.2f}R")
-    out.append("（每笔的图和当时的完整信号报告会单独发送，同一笔只发一次，结果变化时再发）")
+                   f"{pd.Timestamp(t['time']):%m-%d %H:%M} {t['score']}/3 {t['outcome']} {t['r']:+.2f}R"
+                   f"{'' if t['taken'] else ' (低分不做)'}")
+    out.append("说明：统计不含手续费/资金费/滑点；RS 排名只在实时扫描计算，回放里不含 RS")
     return out
 
 
@@ -251,7 +262,8 @@ def send_cases(trades, frames, cfg, ex_name, run_dir, notifier, state):
     k = cfg["validation"]["show_cases"]
     sc = cfg["strategy"]
     # 刚在最新一根K线触发的入场，已经作为实时信号发过，不再当历史案例重复发
-    recent = sorted([t for t in trades if not (t["open"] and t["exit_idx"] - t["idx"] < 1)],
+    # 只发高分（会做的）案例；刚在最新一根K线触发的已作为实时信号发过，不再重复
+    recent = sorted([t for t in trades if t["taken"] and not (t["open"] and t["exit_idx"] - t["idx"] < 1)],
                     key=lambda t: t["time"], reverse=True)
     wins = [t for t in recent if t["success"]]
     cases = wins[:k] + [t for t in recent if not t["success"]][: max(0, k - len(wins))]

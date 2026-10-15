@@ -53,7 +53,7 @@ def make_downtrend(seed=3):
         "close": close, "volume": np.full(n, 1e6)})
 
 
-def make_two_base_4h(seed=11, breakout=False, follow=0):
+def make_two_base_4h(seed=11, breakout=False, follow=0, breakout_vol=1.2e6, wick=False):
     """模拟师父截图那种走势：起涨 → B1(13%,3%) → 突破上涨 → B2(16.8%,5.8%) → 接近 pivot。返回 (4h, 日线)。"""
     rng = np.random.default_rng(seed)
     pts = [(0, 0.0065), (90, 0.0105),                       # 起涨（到 B2 高点涨幅 ≈ 126%）
@@ -62,19 +62,21 @@ def make_two_base_4h(seed=11, breakout=False, follow=0):
            (25, 0.01225), (30, 0.01335), (10, 0.01262), (12, 0.01330)]  # B2: C1≈16.8% C2≈5.5%
     close = _path(pts, rng, noise=0.004)
     n = len(close)
-    vol = np.full(n, 4e4) * (1 + rng.uniform(-0.2, 0.2, n))
+    vol = np.full(n, 4e5) * (1 + rng.uniform(-0.2, 0.2, n))   # 每根 4h 约 40 万 USDT（日成交额约 240 万）
     vol[-40:] *= 0.6                                        # 末段缩量
     if breakout:
         close = np.append(close, 0.01350)
-        vol = np.append(vol, 1.2e5)
+        vol = np.append(vol, breakout_vol)
         n += 1
     if follow:  # 突破后继续上涨
         close = np.append(close, np.linspace(close[-1], close[-1] * 1.45, follow + 1)[1:])
-        vol = np.append(vol, np.full(follow, 6e4))
+        vol = np.append(vol, np.full(follow, 6e5))
         n += follow
     openp = np.r_[close[0], close[:-1]]
     high = np.maximum(openp, close) * (1 + rng.uniform(0.0005, 0.003, n))
     low = np.minimum(openp, close) * (1 - rng.uniform(0.0005, 0.003, n))
+    if wick:  # 最后一根拉出长上影线（冲高回落）
+        high[-1] = max(openp[-1], close[-1]) * 1.06
     t = pd.date_range("2026-06-01", periods=n, freq="4h", tz="UTC")
     df = pd.DataFrame({"time": t, "open": openp, "high": high, "low": low, "close": close, "volume": vol})
     d1 = (df.set_index("time").resample("1D")

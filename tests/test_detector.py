@@ -122,3 +122,43 @@ def test_low_rs_demotes_signal():
     assert s.status == "SETUP"
     apply_rs(s, 40)
     assert s.status == "NONE" and not s.stage["s2"] and s.rs == 40
+
+
+def test_score_is_sign_sum_like_master_example():
+    from vcp.engine import Signal, _finalize
+    s = Signal("X")
+    s.s, s.c, s.v = (1.5, []), (3.0, []), (-2.0, [])          # 师父的 CTRUSDT：S+ C+ V-
+    _finalize(s)
+    assert s.score == 1 and s.rating == "GOOD"
+
+
+def test_full_marks_breakout():
+    df, d1 = make_two_base_4h(breakout=True)
+    s = analyze("X", df, d1)
+    assert s.status == "BREAKOUT" and s.score == 3 and s.rating == "EXCELLENT"
+
+
+def test_breakout_without_volume_is_deducted():
+    df, d1 = make_two_base_4h(breakout=True, breakout_vol=1e5)    # 突破K线成交额远低于 MA50
+    s = analyze("X", df, d1)
+    assert any("无量突破" in x for x in s.v[1]) and s.v[0] < 0 and s.score <= 1
+
+
+def test_long_upper_wick_is_deducted():
+    df, d1 = make_two_base_4h(breakout=True, wick=True)
+    s = analyze("X", df, d1)
+    assert any("长上影线" in x for x in s.c[1])
+
+
+def test_low_daily_volume_is_deducted():
+    df, d1 = make_two_base_4h()
+    df = df.copy()
+    df["volume"] = df["volume"] / 20                               # 日成交额 ≈ 12 万
+    s = analyze("X", df, d1)
+    assert any("流动性差" in x for x in s.v[1])
+
+
+def test_replay_records_score_buckets():
+    df, d1 = make_two_base_4h(breakout=True, follow=40)
+    trades = replay("X", df, d1, 300)
+    assert trades and all("score" in t and "taken" in t for t in trades)

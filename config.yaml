@@ -94,8 +94,16 @@ strategy:
   vol_quiet: 0.8                  # < 0.8 倍 = 缩量
   liquidity_cap_pct: 0.10         # 单笔上限 = 最新 4h 成交额的 10%
 
-  # 5) 评级：WEAK < FAIR < GOOD < EXCELLENT，低于 min_rating 不提醒
-  min_rating: FAIR
+  # 5) 扣分制（师父的做法：走满分，慢慢扣分）
+  #    S 结构 / C 收缩 / V 成交量 三项各自加减分，最后每项正数记 +1、负数记 -1，合计 = Score（满分 3）
+  #    师父的四条扣分：不在 Stage 2、无量（突破K线成交额没超过 MA50）、长上影线、日成交额不到 100 万
+  min_daily_volume: 1000000       # 最近 24h 成交额 < 100 万 USDT → 流动性差，V 扣 2 分
+  wick_lookback: 3                # 检查最近 3 根 4h 有没有长上影线
+  wick_ratio: 0.5                 # 上影线 ≥ 整根K线的 50% = 长上影线，C 扣 2 分
+
+  # 6) 评级：Score 3 = EXCELLENT，2 = STRONG，1 = GOOD，0 = FAIR，负分 = WEAK
+  #    只做高分：低于 min_rating 不提醒、不进场（纪律）
+  min_rating: GOOD
 
 # ---------- 账户（用来算仓位） ----------
 account:
