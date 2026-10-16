@@ -43,6 +43,10 @@ class Notifier:
                           "请在 Telegram 搜索 @userinfobot，点 Start，它回复的 Id 才是你的 chat_id。")
                 elif "chat not found" in r.text or "bot was blocked" in r.text:
                     print(f"  → chat_id={chat} 这个账号要先在 Telegram 里打开你的机器人，点 Start（开始），之后才能收到消息。")
+                elif "upgraded to a supergroup" in r.text or "migrate_to_chat_id" in r.text:
+                    print(f"  → 群组 {chat} 已升级成超级群，ID 变了，请把 config.yaml 里的 chat_id 换成上面 migrate_to_chat_id 的数字。")
+                elif "not enough rights" in r.text or "have no rights" in r.text:
+                    print(f"  → 机器人在群 {chat} 里没有发言权限，请在群设置里允许它发消息（或设为管理员）。")
                 elif r.status_code == 401:
                     print("  → bot_token 不正确，请到 @BotFather 重新复制。")
         except Exception as e:
