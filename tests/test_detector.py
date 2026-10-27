@@ -244,3 +244,25 @@ def test_exec_ma_stack_required():
     assert any("均线没有多头排列" in r for r in s.reasons)
     s = analyze("X", df, d1)
     assert s.ma_stack["ok"] and s.status == "SETUP"
+
+
+def test_messy_moving_averages_are_deducted():
+    # 横盘震荡：均线来回交叉、缠在一起 → 就算最后一根刚好多头排列，也要扣分
+    import pandas as pd
+    from vcp.engine import _score, ma_stack
+    n = 400
+    t = np.arange(n)
+    close = 100 + 2 * np.sin(t / 9) + np.linspace(0, 1.5, n)      # 震荡 + 一点点往上
+    df = pd.DataFrame({"time": pd.date_range("2026-01-01", periods=n, freq="30min", tz="UTC"),
+                       "open": close, "high": close * 1.002, "low": close * 0.998, "close": close,
+                       "volume": np.full(n, 1e6)})
+    st = ma_stack(df, DEFAULTS)
+    assert (not st["ok"]) or st["messy"], st
+    # 打分：把“混乱”套到一个原本干净的信号上，S 会被扣成 0 或负数 → Score 下降
+    good, d1 = make_two_base_4h()
+    s = analyze("X", good, d1)
+    before = s.score
+    s.ma_stack = {**s.ma_stack, "messy": ["多头排列才3根(需≥20)", "均线缠绕(MA50只比MA200高0.3%)"]}
+    _score(s, good, DEFAULTS, breakout=False)
+    assert s.s[0] < 0 and s.score <= before - 2
+    assert any("均线缠绕" in x for x in s.s[1])

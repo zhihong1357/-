@@ -107,6 +107,11 @@ strategy:
   min_rating: GOOD
   # 执行周期（4h/1h/30m）的均线必须多头排列：MA50 > MA150 > MA200，否则不提醒（师父）
   require_ma_stack: true
+  # 均线混乱扣分（S 结构）：就算最后一根刚好多头排列，下面这些也要扣分
+  ma_stack_min_bars: 20           # 多头排列要连续保持 ≥ 20 根K线，否则“刚排好/混乱”，S 扣 1 分
+  ma_min_spread: 0.01             # MA50 至少比 MA200 高 1%，否则“均线缠绕”，S 扣 1 分
+  ma_slope_bars: 10               # MA50 要比 10 根前高
+  ma_slope_penalty: 0.5           # MA50 走平/向下，S 扣 0.5 分
 
 # ---------- 账户（用来算仓位） ----------
 account:
