@@ -75,6 +75,11 @@ DEFAULTS = {
     "min_rating": "GOOD",           # 低于这个评级不提醒：WEAK < FAIR < GOOD < STRONG < EXCELLENT
     "min_score": 1,                 # Score 低于这个分数不提醒
     "require_ma_stack": True,       # 执行周期必须 MA50 > MA150 > MA200（多头排列），否则不提醒
+    "ma_stack_min_bars": 20,        # 多头排列要连续保持 ≥ 20 根K线，否则“刚排好/混乱”，S 扣分
+    "ma_min_spread": 0.01,          # MA50 至少比 MA200 高 1%，否则“均线缠绕”，S 扣分
+    "ma_messy_penalty": 1.0,        # 上面两项各扣 1 分
+    "ma_slope_bars": 10,            # MA50 要比 10 根前高（向上）
+    "ma_slope_penalty": 0.5,        # MA50 走平/向下扣 0.5
     # 仓位
     "account_usdt": 1000,
     "risk_per_trade_pct": 0.01,
@@ -432,15 +437,41 @@ def _core(symbol: str, df: pd.DataFrame, d1: pd.DataFrame, cfg: dict) -> Signal:
 
 def ma_stack(df: pd.DataFrame, cfg: dict) -> dict:
     """执行周期的均线多头排列：MA50 > MA150 > MA200（师父：小周期的 VCP 必须在多头排列里）。
-    价格不一定要在均线上方（师父 BTW/UAI/NMR 的例子价格都在 MA50 下），但三条均线的顺序必须是多头。"""
+    价格不一定要在均线上方（师父 BTW/UAI/NMR 的例子价格都在 MA50 下），但三条均线的顺序必须是多头。
+    另外检查“均线混乱”：多头排列刚形成 / 三条均线缠在一起 / MA50 走平向下（用于 S 扣分）。"""
     c = df["close"]
     ks = [k for k in (50, 150, 200) if len(df) >= k]
-    vals = {k: float(c.rolling(k).mean().iloc[-1]) for k in ks}
     if len(ks) < 2:
-        return {"ok": True, "text": "K线太少，未检查", "vals": vals}
-    ok = all(vals[a] > vals[b] for a, b in zip(ks, ks[1:]))
-    text = " > ".join(f"MA{k}" for k in ks) if ok else " / ".join(f"MA{k} {vals[k]:.6g}" for k in ks)
-    return {"ok": ok, "text": text, "vals": vals}
+        return {"ok": True, "text": "K线太少，未检查", "vals": {}, "held": None, "spread": None,
+                "fast_up": True, "messy": []}
+    ma = {k: c.rolling(k).mean().to_numpy() for k in ks}
+    vals = {k: float(ma[k][-1]) for k in ks}
+    stacked = np.ones(len(df), dtype=bool)
+    for a, b in zip(ks, ks[1:]):
+        stacked &= ma[a] > ma[b]
+    ok = bool(stacked[-1])
+    # 多头排列已经连续保持了几根K线
+    held = 0
+    for x in stacked[::-1]:
+        if not x:
+            break
+        held += 1
+    spread = vals[ks[0]] / vals[ks[-1]] - 1                       # MA50 和最慢那条均线拉开多少
+    k_slope = cfg["ma_slope_bars"]
+    fast_up = bool(len(df) > ks[0] + k_slope and ma[ks[0]][-1] > ma[ks[0]][-1 - k_slope])
+    messy = []
+    if ok and held < cfg["ma_stack_min_bars"]:
+        messy.append(f"多头排列才{held}根(需≥{cfg['ma_stack_min_bars']})")
+    if ok and spread < cfg["ma_min_spread"]:
+        messy.append(f"均线缠绕(MA{ks[0]}只比MA{ks[-1]}高{spread * 100:.1f}%)")
+    if ok and not fast_up:
+        messy.append(f"MA{ks[0]}走平/向下")
+    if ok:
+        text = " > ".join(f"MA{k}" for k in ks) + f"，已保持{held}根，MA{ks[0]}高于MA{ks[-1]} {spread * 100:.1f}%"
+    else:
+        text = " / ".join(f"MA{k} {vals[k]:.6g}" for k in ks)
+    return {"ok": ok, "text": text, "vals": vals, "held": held, "spread": spread, "fast_up": fast_up,
+            "messy": messy}
 
 
 def depths(b: Base) -> str:
@@ -528,6 +559,12 @@ def _score(sig: Signal, df: pd.DataFrame, cfg: dict, breakout: bool) -> None:
     if len(seq) >= 3 and all(a > b for a, b in zip(seq, seq[1:])):
         s += 0.5
         sr.append("Close确认排列")
+    # 均线混乱（多头排列刚形成 / 缠绕 / MA50 走平）：每一项都扣分
+    stack = sig.ma_stack or ma_stack(df, cfg)
+    for m in stack.get("messy", []):
+        pts = cfg["ma_slope_penalty"] if m.endswith("走平/向下") else cfg["ma_messy_penalty"]
+        s -= pts
+        sr.append(f"{m} -{pts:g}")
     # C 收缩
     b = sig.base
     cc, cr = c_points(b, breakout, cfg) if b and b.cons else (0.0, [])
